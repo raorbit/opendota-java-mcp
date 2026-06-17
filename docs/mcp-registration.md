@@ -72,6 +72,12 @@ place a `.mcp.json` file at the project root. The structure is identical to the
 A ready-to-edit template lives at [`.mcp.json.example`](../.mcp.json.example) in
 the repository root — copy it to `.mcp.json` and fill in (or clear) the key.
 
+`.mcp.json` (and `claude_desktop_config.json`) are git-ignored so a key pasted
+into them is never accidentally committed. For the strongest hygiene, prefer
+exporting `OPENDOTA_API_KEY` as a real environment variable in your shell or OS
+keychain and leaving the value in the JSON empty, rather than inlining the secret
+into a file at all.
+
 ## Running the server directly
 
 You can also launch the jar yourself, for example to smoke-test it before
