@@ -91,8 +91,10 @@ public class MatchTools {
      * a query-injection sink: today's callers pass only numeric values (left
      * byte-for-byte unchanged by the encoder), but a future non-numeric parameter
      * is then automatically safe.
+     *
+     * <p>Package-private (not {@code private}) so its encoding can be unit-tested directly.
      */
-    private static final class QueryBuilder {
+    static final class QueryBuilder {
 
         private final StringBuilder sb;
         private boolean first = true;
