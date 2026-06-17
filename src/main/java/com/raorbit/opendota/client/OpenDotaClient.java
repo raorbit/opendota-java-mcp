@@ -90,7 +90,9 @@ public class OpenDotaClient {
 
         String url = base + path;
         if (keyed) {
-            url += (path.indexOf('?') >= 0 ? "&" : "?") + "api_key=" + apiKey;
+            // Encode the key so an operator-supplied value containing characters
+            // illegal in a URL query cannot make URI.create throw out of getJson.
+            url += (path.indexOf('?') >= 0 ? "&" : "?") + "api_key=" + encode(apiKey);
         }
 
         HttpRequest request = HttpRequest.newBuilder()

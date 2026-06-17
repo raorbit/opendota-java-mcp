@@ -143,6 +143,65 @@ class OpenDotaClientTest {
     }
 
     @Test
+    void zeroTtlEndpointIsNotCached() throws Exception {
+        // /live has a zero TTL, so every call must reach upstream.
+        String body = "[{\"match_id\":1}]";
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/live", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 200, body);
+        });
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThat(client.getJson("/live")).isEqualTo(body);
+        assertThat(client.getJson("/live")).isEqualTo(body);
+
+        // Two upstream requests prove nothing was served from cache.
+        assertThat(hits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void errorResponseIsNotCached() throws Exception {
+        // /players/* is cacheable (30s TTL), but a non-2xx must NOT be cached: a
+        // failing call followed by a retry must re-hit upstream and get the 200.
+        String body = "{\"profile\":{\"account_id\":123}}";
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/players/123", exchange -> {
+            int n = hits.incrementAndGet();
+            if (n == 1) {
+                respond(exchange, 500, "{\"error\":\"boom\"}");
+            } else {
+                respond(exchange, 200, body);
+            }
+        });
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThatThrownBy(() -> client.getJson("/players/123"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(500));
+
+        assertThat(client.getJson("/players/123")).isEqualTo(body);
+        assertThat(hits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void apiKeyWithIllegalUrlCharsIsEncodedNotThrown() throws Exception {
+        stub("/api/heroes", 200, "[]");
+
+        // A key containing a space is illegal in a raw URL query; it must be
+        // percent/form-encoded rather than escaping getJson as an unchecked
+        // IllegalArgumentException from URI.create.
+        OpenDotaClient client = new OpenDotaClient("ab cd", base);
+
+        client.getJson("/heroes");
+
+        assertThat(received).hasSize(1);
+        assertThat(received.get(0)).contains("api_key=ab+cd");
+    }
+
+    @Test
     void keyedClientAppendsApiKeyQueryParam() throws Exception {
         stub("/api/heroes", 200, "[]");
 

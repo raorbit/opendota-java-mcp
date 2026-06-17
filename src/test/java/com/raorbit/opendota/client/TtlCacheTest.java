@@ -53,4 +53,43 @@ class TtlCacheTest {
         assertThat(cache.get("/heroes")).isNull();
         assertThat(cache.get("/heroStats")).isNull();
     }
+
+    @Test
+    void evictsEntryNearestToExpiryWhenOverCapacity() {
+        TtlCache cache = new TtlCache(2);
+        cache.put("a", "1", Duration.ofSeconds(30));   // expires soonest
+        cache.put("b", "2", Duration.ofSeconds(120));
+        // At capacity (2); a new key evicts the live entry nearest to expiry ("a").
+        cache.put("c", "3", Duration.ofSeconds(120));
+        assertThat(cache.get("a")).isNull();
+        assertThat(cache.get("b")).isEqualTo("2");
+        assertThat(cache.get("c")).isEqualTo("3");
+    }
+
+    @Test
+    void evictionReclaimsExpiredEntriesBeforeLiveOnes() throws InterruptedException {
+        TtlCache cache = new TtlCache(2);
+        cache.put("stale", "x", Duration.ofMillis(30));
+        cache.put("fresh", "y", Duration.ofSeconds(120));
+        // Let "stale" expire, then fill to capacity again.
+        long deadlineNanos = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (cache.get("stale") != null && System.nanoTime() < deadlineNanos) {
+            Thread.sleep(10);
+        }
+        // The expired "stale" is reclaimed, so the live "fresh" survives.
+        cache.put("new", "z", Duration.ofSeconds(120));
+        assertThat(cache.get("fresh")).isEqualTo("y");
+        assertThat(cache.get("new")).isEqualTo("z");
+    }
+
+    @Test
+    void replacingAnExistingKeyAtCapacityDoesNotEvict() {
+        TtlCache cache = new TtlCache(2);
+        cache.put("a", "1", Duration.ofSeconds(120));
+        cache.put("b", "2", Duration.ofSeconds(120));
+        // Re-putting an existing key is not growth, so nothing is evicted.
+        cache.put("a", "1-updated", Duration.ofSeconds(120));
+        assertThat(cache.get("a")).isEqualTo("1-updated");
+        assertThat(cache.get("b")).isEqualTo("2");
+    }
 }

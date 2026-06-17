@@ -26,6 +26,9 @@ public class PlayerTools {
     @Tool(name = "search_players",
             description = "Search OpenDota for Dota 2 players by name; returns candidate account_ids.")
     public String searchPlayers(String q) {
+        if (q == null || q.isBlank()) {
+            return ToolResults.badArg("/search", "q is required");
+        }
         String path = "/search?q=" + OpenDotaClient.encode(q);
         try {
             return client.getJson(path);
