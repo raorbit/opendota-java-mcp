@@ -27,7 +27,7 @@ public class OpenDotaProperties {
      * exceeds this is aborted rather than buffered, so a hostile or misbehaving
      * upstream cannot exhaust the heap.
      */
-    private int maxResponseBytes = 16 * 1024 * 1024;
+    private long maxResponseBytes = 16L * 1024 * 1024;
 
     public int getCacheMaxEntries() {
         return cacheMaxEntries;
@@ -53,11 +53,11 @@ public class OpenDotaProperties {
         this.rateLimitBudget = rateLimitBudget;
     }
 
-    public int getMaxResponseBytes() {
+    public long getMaxResponseBytes() {
         return maxResponseBytes;
     }
 
-    public void setMaxResponseBytes(int maxResponseBytes) {
+    public void setMaxResponseBytes(long maxResponseBytes) {
         this.maxResponseBytes = maxResponseBytes;
     }
 }

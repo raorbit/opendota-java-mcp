@@ -44,7 +44,13 @@ public class OpenDotaClient implements AutoCloseable {
     /** Default approximate upper bound on total bytes of cached response bodies. */
     private static final long DEFAULT_CACHE_MAX_BYTES = 64L * 1024 * 1024;
     /** Default maximum size of a single upstream response body before it is aborted. */
-    private static final int DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+    private static final long DEFAULT_MAX_RESPONSE_BYTES = 16L * 1024 * 1024;
+    /**
+     * Hard upper bound on the configurable response cap, kept well below the JVM
+     * array-size limit so an oversized cap can never drive the read buffer into an
+     * {@link OutOfMemoryError} (which would bypass the clean error-envelope path).
+     */
+    private static final long MAX_RESPONSE_BYTES_CEILING = 256L * 1024 * 1024;
     /** Maximum length of an upstream error body surfaced in the error envelope. */
     private static final int MAX_UPSTREAM_SNIPPET = 512;
 
@@ -59,7 +65,7 @@ public class OpenDotaClient implements AutoCloseable {
      * than this is aborted mid-stream rather than buffered, so a hostile or
      * misbehaving upstream cannot exhaust the heap.
      */
-    private final int maxResponseBytes;
+    private final long maxResponseBytes;
     /**
      * Upper bound on time a request may spend waiting for a rate-limit permit.
      * Kept comfortably under typical MCP client request timeouts so an exhausted
@@ -81,7 +87,7 @@ public class OpenDotaClient implements AutoCloseable {
      * @param maxResponseBytes maximum size of a single upstream response body
      */
     public OpenDotaClient(String apiKey, int cacheMaxEntries, long cacheMaxBytes,
-                          Duration rateLimitBudget, int maxResponseBytes) {
+                          Duration rateLimitBudget, long maxResponseBytes) {
         this(apiKey, DEFAULT_BASE, cacheMaxEntries, cacheMaxBytes, rateLimitBudget, maxResponseBytes);
     }
 
@@ -96,13 +102,13 @@ public class OpenDotaClient implements AutoCloseable {
     }
 
     /** Package-private constructor for tests that need to override the response-size cap. */
-    OpenDotaClient(String apiKey, String baseUrl, int maxResponseBytes) {
+    OpenDotaClient(String apiKey, String baseUrl, long maxResponseBytes) {
         this(apiKey, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
                 DEFAULT_RATE_LIMIT_BUDGET, maxResponseBytes);
     }
 
     OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, long cacheMaxBytes,
-                   Duration rateLimitBudget, int maxResponseBytes) {
+                   Duration rateLimitBudget, long maxResponseBytes) {
         String trimmed = apiKey == null ? null : apiKey.trim();
         if (trimmed != null && trimmed.isEmpty()) {
             trimmed = null;
@@ -110,13 +116,27 @@ public class OpenDotaClient implements AutoCloseable {
         this.apiKey = trimmed;
         this.keyed = this.apiKey != null;
         this.base = baseUrl;
+        // Fail fast on invalid tunables, uniformly with TtlCache (which rejects a
+        // non-positive entry/byte bound), rather than silently coercing some knobs
+        // while others crash bean creation. Validate before allocating the transport
+        // so a misconfigured client never leaves an unclosed HttpClient behind.
+        if (rateLimitBudget == null || rateLimitBudget.isNegative()) {
+            throw new IllegalArgumentException("rateLimitBudget must not be null or negative: " + rateLimitBudget);
+        }
+        if (maxResponseBytes <= 0) {
+            throw new IllegalArgumentException("maxResponseBytes must be positive: " + maxResponseBytes);
+        }
+        if (maxResponseBytes > MAX_RESPONSE_BYTES_CEILING) {
+            throw new IllegalArgumentException(
+                    "maxResponseBytes must not exceed " + MAX_RESPONSE_BYTES_CEILING + ": " + maxResponseBytes);
+        }
+        this.rateLimitBudget = rateLimitBudget;
+        this.maxResponseBytes = maxResponseBytes;
+        this.cache = new TtlCache(cacheMaxEntries, cacheMaxBytes);
+        this.rateLimiter = new RateLimiter(keyed ? 300 : 60);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(CONNECT_TIMEOUT)
                 .build();
-        this.rateLimiter = new RateLimiter(keyed ? 300 : 60);
-        this.cache = new TtlCache(cacheMaxEntries, cacheMaxBytes);
-        this.rateLimitBudget = rateLimitBudget == null ? DEFAULT_RATE_LIMIT_BUDGET : rateLimitBudget;
-        this.maxResponseBytes = maxResponseBytes > 0 ? maxResponseBytes : DEFAULT_MAX_RESPONSE_BYTES;
     }
 
     /**
@@ -229,8 +249,15 @@ public class OpenDotaClient implements AutoCloseable {
                 }
                 return body;
             }
-            // Redact and bound the error body before it reaches the error envelope.
-            throw new OpenDotaException(status, path, sanitizeUpstream(body));
+            // Scrub the actual key value (raw and URL-encoded) first, so an upstream
+            // that echoes the credential in any shape (not just the api_key= query
+            // form the pattern below covers) cannot leak it; then apply the generic
+            // pattern redaction and length bound before it reaches the error envelope.
+            String scrubbed = body;
+            if (keyed && scrubbed != null) {
+                scrubbed = scrubbed.replace(apiKey, "REDACTED").replace(encode(apiKey), "REDACTED");
+            }
+            throw new OpenDotaException(status, path, sanitizeUpstream(scrubbed));
         } catch (IOException e) {
             if (isResponseTooLarge(e)) {
                 throw new OpenDotaException(0, path,
