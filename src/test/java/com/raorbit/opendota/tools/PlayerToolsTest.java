@@ -18,12 +18,54 @@ class PlayerToolsTest {
         when(client.getJson(anyString())).thenReturn("[]");
         PlayerTools tools = new PlayerTools(client);
 
-        // account_id=123, limit=5, hero_id=null, win=1, rest null.
-        tools.getPlayerWl(123L, 5, null, 1, null, null, null);
+        // account_id=123, limit=5, offset=null, hero_id=null, win=1, rest null.
+        tools.getPlayerWl(123L, 5, null, null, 1, null, null, null);
 
         ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
         org.mockito.Mockito.verify(client).getJson(path.capture());
         assertThat(path.getValue()).isEqualTo("/players/123/wl?limit=5&win=1");
+    }
+
+    @Test
+    void getPlayerMatchesBuildsQueryIncludingSortString() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        // limit=10, offset=20, rest null, sort="kills" — exercises the lone String
+        // filter through appendParam (which URL-encodes the value).
+        tools.getPlayerMatches(123L, 10, 20, null, null, null, null, null, "kills");
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/players/123/matches?limit=10&offset=20&sort=kills");
+    }
+
+    @Test
+    void getPlayerHeroesBuildsQueryWithFilters() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        // getPlayerHeroes(account_id, limit, date); date null is skipped.
+        tools.getPlayerHeroes(7L, 3, null);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/players/7/heroes?limit=3");
+    }
+
+    @Test
+    void searchPlayersWithBlankQueryReturnsBadArgWithoutCallingClient() {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        PlayerTools tools = new PlayerTools(client);
+
+        String result = tools.searchPlayers("   ");
+
+        assertThat(result)
+                .contains("\"isError\":true")
+                .contains("\"status\":400");
+        org.mockito.Mockito.verifyNoInteractions(client);
     }
 
     @Test

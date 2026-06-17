@@ -31,7 +31,7 @@ public class HeroTools {
         }
     }
 
-    @Tool(name = "get_hero_stats", description = "Aggregate hero pick/win/ban stats by rank tier (last 7 days).")
+    @Tool(name = "get_hero_stats", description = "Aggregate hero pick/win/ban stats by rank tier from recent matches.")
     public String getHeroStats() {
         String path = "/heroStats";
         try {

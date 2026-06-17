@@ -10,8 +10,15 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -226,5 +233,66 @@ class OpenDotaClientTest {
 
         assertThat(received).hasSize(1);
         assertThat(received.get(0)).doesNotContain("api_key");
+    }
+
+    @Test
+    void ttlForMapsEndpointsToExpectedDurations() {
+        OpenDotaClient client = new OpenDotaClient(null, base);
+        assertThat(client.ttlFor("/live")).isEqualTo(Duration.ZERO);
+        assertThat(client.ttlFor("/heroes")).isEqualTo(Duration.ofHours(6));
+        assertThat(client.ttlFor("/constants/items")).isEqualTo(Duration.ofHours(6));
+        assertThat(client.ttlFor("/heroStats")).isEqualTo(Duration.ofHours(1));
+        assertThat(client.ttlFor("/players/123")).isEqualTo(Duration.ofSeconds(30));
+        // Query string is stripped before prefix matching.
+        assertThat(client.ttlFor("/players/123/wl?limit=5")).isEqualTo(Duration.ofSeconds(30));
+        assertThat(client.ttlFor("/matches/456")).isEqualTo(Duration.ofSeconds(60));
+        assertThat(client.ttlFor("/proMatches")).isEqualTo(Duration.ofSeconds(45));
+        assertThat(client.ttlFor("/publicMatches?min_rank=70")).isEqualTo(Duration.ofSeconds(45));
+        assertThat(client.ttlFor("/search?q=abc")).isEqualTo(Duration.ofSeconds(15));
+        assertThat(client.ttlFor("/rankings?hero_id=1")).isEqualTo(Duration.ofSeconds(15));
+        assertThat(client.ttlFor(null)).isEqualTo(Duration.ofSeconds(30));
+    }
+
+    @Test
+    void concurrentIdenticalRequestsShareOneUpstreamCall() throws Exception {
+        // Single-flight: concurrent misses on the same key must collapse to one
+        // upstream GET (the rest await the leader's result).
+        String body = "{\"profile\":{\"account_id\":123}}";
+        AtomicInteger hits = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        server.createContext("/api/players/123", exchange -> {
+            hits.incrementAndGet();
+            try {
+                // Hold the leader's response until all followers have registered.
+                release.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            respond(exchange, 200, body);
+        });
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        int n = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(n);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<String>> futures = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            futures.add(pool.submit(() -> {
+                start.await();
+                return client.getJson("/players/123");
+            }));
+        }
+        start.countDown();
+        // Let all callers reach the in-flight wait, then let the leader respond.
+        Thread.sleep(250);
+        release.countDown();
+
+        for (Future<String> f : futures) {
+            assertThat(f.get(3, TimeUnit.SECONDS)).isEqualTo(body);
+        }
+        pool.shutdownNow();
+
+        assertThat(hits.get()).isEqualTo(1);
     }
 }

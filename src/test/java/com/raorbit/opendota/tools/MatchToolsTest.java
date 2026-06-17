@@ -40,6 +40,19 @@ class MatchToolsTest {
     }
 
     @Test
+    void getProMatchesWithPagingBuildsQuery() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        MatchTools tools = new MatchTools(client);
+
+        tools.getProMatches(700000000L);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/proMatches?less_than_match_id=700000000");
+    }
+
+    @Test
     void getPublicMatchesBuildsFullQuery() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         when(client.getJson(anyString())).thenReturn("[]");

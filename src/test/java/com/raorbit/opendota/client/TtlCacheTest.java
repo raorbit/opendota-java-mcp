@@ -1,8 +1,16 @@
 package com.raorbit.opendota.client;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -45,16 +53,6 @@ class TtlCacheTest {
     }
 
     @Test
-    void clearEmptiesCache() {
-        TtlCache cache = new TtlCache();
-        cache.put("/heroes", "[1]", Duration.ofSeconds(30));
-        cache.put("/heroStats", "[2]", Duration.ofSeconds(30));
-        cache.clear();
-        assertThat(cache.get("/heroes")).isNull();
-        assertThat(cache.get("/heroStats")).isNull();
-    }
-
-    @Test
     void evictsEntryNearestToExpiryWhenOverCapacity() {
         TtlCache cache = new TtlCache(2);
         cache.put("a", "1", Duration.ofSeconds(30));   // expires soonest
@@ -91,5 +89,36 @@ class TtlCacheTest {
         cache.put("a", "1-updated", Duration.ofSeconds(120));
         assertThat(cache.get("a")).isEqualTo("1-updated");
         assertThat(cache.get("b")).isEqualTo("2");
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void concurrentPutAndGetIsThreadSafe() throws Exception {
+        TtlCache cache = new TtlCache(10_000);
+        int threads = 8;
+        int perThread = 500;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+        for (int t = 0; t < threads; t++) {
+            final int tid = t;
+            futures.add(pool.submit(() -> {
+                start.await();
+                for (int i = 0; i < perThread; i++) {
+                    String key = "/p/" + tid + "/" + i;
+                    cache.put(key, "v" + i, Duration.ofSeconds(60));
+                    cache.get(key);
+                }
+                return null;
+            }));
+        }
+        start.countDown();
+        // get() on each future rethrows any exception the task hit (e.g. a
+        // ConcurrentModificationException from a non-thread-safe map).
+        for (Future<?> f : futures) {
+            f.get(5, TimeUnit.SECONDS);
+        }
+        pool.shutdownNow();
+        assertThat(cache.get("/p/0/0")).isEqualTo("v0");
     }
 }

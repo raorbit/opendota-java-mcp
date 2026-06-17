@@ -1,5 +1,6 @@
 package com.raorbit.opendota.client;
 
+import java.time.Duration;
 import java.util.concurrent.locks.LockSupport;
 
 /**
@@ -7,6 +8,10 @@ import java.util.concurrent.locks.LockSupport;
  *
  * <p>Refills at a steady rate of {@code permitsPerMinute / 60s}, capped at
  * {@code permitsPerMinute} tokens. Framework-agnostic plain Java.
+ *
+ * <p>Waiters are not ordered: fairness is best-effort, so under sustained
+ * saturation a late arrival may acquire a refilled permit ahead of a
+ * longer-waiting thread.
  */
 public final class RateLimiter {
 
@@ -60,6 +65,46 @@ public final class RateLimiter {
             if (Thread.interrupted()) {
                 throw new InterruptedException();
             }
+        }
+    }
+
+    /**
+     * Blocks until a permit is available or {@code maxWait} elapses, whichever
+     * comes first, then consumes a permit if one was obtained. A non-positive
+     * {@code maxWait} degrades to a single non-blocking {@link #tryAcquire()}.
+     *
+     * @param maxWait the maximum time to wait for a permit
+     * @return {@code true} if a permit was consumed, {@code false} if the budget
+     *         elapsed first
+     * @throws InterruptedException if the current thread is interrupted while waiting
+     */
+    public boolean tryAcquire(Duration maxWait) throws InterruptedException {
+        if (maxWait == null || maxWait.isZero() || maxWait.isNegative()) {
+            return tryAcquire();
+        }
+        long deadline = System.nanoTime() + maxWait.toNanos();
+        while (true) {
+            if (Thread.interrupted()) {
+                throw new InterruptedException();
+            }
+            long waitNanos;
+            synchronized (lock) {
+                refill();
+                if (tokens >= 1.0) {
+                    tokens -= 1.0;
+                    return true;
+                }
+                double deficit = 1.0 - tokens;
+                waitNanos = (long) Math.ceil(deficit / refillPerNano);
+                if (waitNanos < 1L) {
+                    waitNanos = 1L;
+                }
+            }
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0L) {
+                return false;
+            }
+            LockSupport.parkNanos(Math.min(waitNanos, remaining));
         }
     }
 

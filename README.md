@@ -130,7 +130,8 @@ else written to stdout would corrupt the protocol stream and break the client
 connection. The application is configured to keep stdout clean:
 
 - the Spring Boot startup banner is disabled;
-- console logging is blanked (no log output goes to stdout/stderr);
+- the console log appender is turned off (`logging.threshold.console=OFF`), so no
+  application logs are written to stdout;
 - all logs are written to `./logs/opendota-mcp.log` instead.
 
 When modifying this project, **never** call `System.out.println` (or otherwise

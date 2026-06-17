@@ -71,10 +71,6 @@ public final class TtlCache {
         map.put(key, new Entry(json, expiresAtNanos));
     }
 
-    public void clear() {
-        map.clear();
-    }
-
     /**
      * Bound the cache. First drops every entry whose TTL has elapsed; if the map
      * is still at capacity, evicts the single live entry nearest to expiry.

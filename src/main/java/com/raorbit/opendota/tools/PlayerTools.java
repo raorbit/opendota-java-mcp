@@ -52,6 +52,7 @@ public class PlayerTools {
             description = "Win/loss counts for a Steam32 account_id, with optional filters.")
     public String getPlayerWl(long account_id,
                               @ToolParam(required = false) Integer limit,
+                              @ToolParam(required = false) Integer offset,
                               @ToolParam(required = false) Integer hero_id,
                               @ToolParam(required = false) Integer win,
                               @ToolParam(required = false) Integer game_mode,
@@ -60,6 +61,7 @@ public class PlayerTools {
         StringBuilder sb = new StringBuilder("/players/").append(account_id).append("/wl");
         boolean[] started = {false};
         appendParam(sb, started, "limit", limit);
+        appendParam(sb, started, "offset", offset);
         appendParam(sb, started, "hero_id", hero_id);
         appendParam(sb, started, "win", win);
         appendParam(sb, started, "game_mode", game_mode);

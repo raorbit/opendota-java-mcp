@@ -9,6 +9,9 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 
 /**
  * Thin HTTP client for the OpenDota API.
@@ -22,13 +25,19 @@ import java.time.Duration;
  * outgoing URL only, and never logged, never included in exception messages,
  * and never written to stdout.
  */
-public class OpenDotaClient {
+public class OpenDotaClient implements AutoCloseable {
 
     private static final String DEFAULT_BASE = "https://api.opendota.com/api";
     private static final String USER_AGENT = "opendota-mcp/1.0.0";
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    /**
+     * Upper bound on time a request may spend waiting for a rate-limit permit.
+     * Kept comfortably under typical MCP client request timeouts so an exhausted
+     * bucket fails fast with an error envelope instead of parking indefinitely.
+     */
+    private static final Duration RATE_LIMIT_BUDGET = Duration.ofSeconds(10);
 
     private final String apiKey;
     private final boolean keyed;
@@ -36,6 +45,8 @@ public class OpenDotaClient {
     private final HttpClient httpClient;
     private final RateLimiter rateLimiter;
     private final TtlCache cache;
+    /** In-flight cacheable fetches, so concurrent identical requests share one call. */
+    private final ConcurrentHashMap<String, CompletableFuture<String>> inFlight = new ConcurrentHashMap<>();
 
     public OpenDotaClient(String apiKey) {
         this(apiKey, DEFAULT_BASE);
@@ -74,18 +85,72 @@ public class OpenDotaClient {
         // Cache key is the path BEFORE any api_key is appended.
         String cacheKey = path;
         boolean cacheable = ttl.compareTo(Duration.ZERO) > 0;
-        if (cacheable) {
-            String cached = cache.get(cacheKey);
-            if (cached != null) {
-                return cached;
-            }
+        if (!cacheable) {
+            return fetch(path, cacheKey, ttl, false);
         }
+        String cached = cache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+        return fetchSingleFlight(path, cacheKey, ttl);
+    }
 
+    /**
+     * Fetch a cacheable path with single-flight de-duplication: when several
+     * threads miss the same key at once, the first (the leader) performs the one
+     * upstream call and the rest await its result, so duplicate requests do not
+     * each consume a rate-limit permit.
+     */
+    private String fetchSingleFlight(String path, String cacheKey, Duration ttl) throws OpenDotaException {
+        CompletableFuture<String> mine = new CompletableFuture<>();
+        CompletableFuture<String> leader = inFlight.putIfAbsent(cacheKey, mine);
+        if (leader != null) {
+            return await(leader, path);
+        }
         try {
-            rateLimiter.acquire();
+            // A leader that just finished may have populated the cache between our
+            // miss and registering here, so re-check before going upstream.
+            String cached = cache.get(cacheKey);
+            String body = cached != null ? cached : fetch(path, cacheKey, ttl, true);
+            mine.complete(body);
+            return body;
+        } catch (OpenDotaException | RuntimeException e) {
+            mine.completeExceptionally(e);
+            throw e;
+        } finally {
+            inFlight.remove(cacheKey, mine);
+        }
+    }
+
+    /** Await a leader's in-flight result, translating its failure back into an {@link OpenDotaException}. */
+    private String await(CompletableFuture<String> leader, String path) throws OpenDotaException {
+        try {
+            return leader.get();
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            throw new OpenDotaException(0, path, null, ie);
+            throw new OpenDotaException(0, path, "request interrupted", ie);
+        } catch (ExecutionException ee) {
+            Throwable cause = ee.getCause();
+            if (cause instanceof OpenDotaException ode) {
+                throw ode;
+            }
+            throw new OpenDotaException(0, path,
+                    "request failed: " + (cause == null ? "unknown" : cause.getClass().getSimpleName()), cause);
+        }
+    }
+
+    /** Perform the rate-limited HTTP GET, caching a 2xx body when {@code cacheable}. */
+    private String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
+        boolean acquired;
+        try {
+            acquired = rateLimiter.tryAcquire(RATE_LIMIT_BUDGET);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new OpenDotaException(0, path, "request interrupted", ie);
+        }
+        if (!acquired) {
+            throw new OpenDotaException(429, path,
+                    "client-side rate limit: no permit within " + RATE_LIMIT_BUDGET.toSeconds() + "s");
         }
 
         String url = base + path;
@@ -122,6 +187,12 @@ public class OpenDotaClient {
         }
     }
 
+    /** Release the underlying {@link HttpClient}'s transport resources on shutdown. */
+    @Override
+    public void close() {
+        httpClient.close();
+    }
+
     /** @return {@code true} if a non-blank API key was supplied. */
     public boolean isKeyed() {
         return keyed;
@@ -137,7 +208,7 @@ public class OpenDotaClient {
      * stripped before prefix matching, and more-specific prefixes are checked
      * before more-general ones.
      */
-    private Duration ttlFor(String path) {
+    Duration ttlFor(String path) {
         if (path == null) {
             return Duration.ofSeconds(30);
         }
@@ -146,7 +217,9 @@ public class OpenDotaClient {
 
         // Most-specific prefixes first.
         if (p.startsWith("/heroStats")) {
-            return Duration.ofSeconds(60);
+            // A 7-day aggregate over recent matches; far less volatile than live
+            // data, so it shares the longer static-ish horizon rather than 60s.
+            return Duration.ofHours(1);
         }
         if (p.startsWith("/heroes")) {
             return Duration.ofHours(6);
