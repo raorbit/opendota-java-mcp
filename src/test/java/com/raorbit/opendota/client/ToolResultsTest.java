@@ -48,6 +48,21 @@ class ToolResultsTest {
     }
 
     @Test
+    void fromExceptionReplacesUnpairedSurrogateButKeepsValidPairs() {
+        // A lone high surrogate (e.g. left by a snippet truncated mid-pair) must not
+        // pass through raw; it becomes U+FFFD so the envelope is valid Unicode.
+        String replacement = String.valueOf((char) 0xFFFD);
+        OpenDotaException lone = new OpenDotaException(500, "/x", "bad" + '\uD83D' + "tail");
+        String json = ToolResults.fromException(lone);
+        assertThat(json).doesNotContain("\uD83D").contains(replacement);
+
+        // A well-formed surrogate pair (U+1F600 grinning face) is preserved intact.
+        String grinning = new String(Character.toChars(0x1F600));
+        OpenDotaException pair = new OpenDotaException(500, "/x", "y" + grinning + "z");
+        assertThat(ToolResults.fromException(pair)).contains(grinning);
+    }
+
+    @Test
     void badArgBuildsStatus400Envelope() {
         String json = ToolResults.badArg("/rankings", "hero_id is required");
 

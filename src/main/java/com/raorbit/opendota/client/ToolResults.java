@@ -71,6 +71,17 @@ public final class ToolResults {
                         sb.append("\\u00")
                           .append(HEX[(c >> 4) & 0xF])
                           .append(HEX[c & 0xF]);
+                    } else if (Character.isHighSurrogate(c)) {
+                        // Keep a well-formed pair together; replace an unpaired high
+                        // surrogate (e.g. from a snippet truncated mid-pair) with
+                        // U+FFFD so the envelope is always valid Unicode.
+                        if (i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1))) {
+                            sb.append(c).append(value.charAt(++i));
+                        } else {
+                            sb.append((char) 0xFFFD);
+                        }
+                    } else if (Character.isLowSurrogate(c)) {
+                        sb.append((char) 0xFFFD);
                     } else {
                         sb.append(c);
                     }
