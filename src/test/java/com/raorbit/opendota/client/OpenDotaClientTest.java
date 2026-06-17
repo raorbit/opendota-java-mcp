@@ -254,6 +254,69 @@ class OpenDotaClientTest {
     }
 
     @Test
+    void oversizedResponseBodyIsAbortedNotBuffered() {
+        // Body (4 KB) far exceeds the 1 KB cap, so the read is aborted and mapped
+        // to a transport-level (statusCode 0) error rather than buffered.
+        stub("/api/heroes", 200, "x".repeat(4096));
+
+        OpenDotaClient client = new OpenDotaClient(null, base, 1024);
+
+        assertThatThrownBy(() -> client.getJson("/heroes"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(0);
+                    assertThat(e.responseBody()).contains("exceeded").contains("cap");
+                });
+    }
+
+    @Test
+    void responseBodyJustUnderCapStillSucceeds() throws Exception {
+        String body = "y".repeat(900);
+        stub("/api/heroes", 200, body);
+
+        OpenDotaClient client = new OpenDotaClient(null, base, 1024);
+
+        assertThat(client.getJson("/heroes")).isEqualTo(body);
+    }
+
+    @Test
+    void errorBodyApiKeyIsRedactedAndTruncatedInEnvelope() {
+        // A hostile/echoing upstream returns a 500 whose body contains the inbound
+        // api_key and is longer than the 512-char snippet bound.
+        String errorBody = "api_key=SUPERSECRET denied " + "z".repeat(600);
+        stub("/api/players/777", 500, errorBody);
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThatThrownBy(() -> client.getJson("/players/777"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(500);
+                    assertThat(e.responseBody())
+                            .contains("api_key=REDACTED")
+                            .doesNotContain("SUPERSECRET")
+                            .endsWith("...(truncated)");
+                    assertThat(e.responseBody().length()).isLessThanOrEqualTo(512 + "...(truncated)".length());
+                });
+    }
+
+    @Test
+    void sanitizeUpstreamRedactsTruncatesAndIsNullSafe() {
+        assertThat(OpenDotaClient.sanitizeUpstream(null)).isNull();
+        // A clean, short body is returned unchanged.
+        assertThat(OpenDotaClient.sanitizeUpstream("{\"error\":\"Not Found\"}"))
+                .isEqualTo("{\"error\":\"Not Found\"}");
+        // api_key=... is redacted regardless of case, stopping at a delimiter.
+        assertThat(OpenDotaClient.sanitizeUpstream("GET /x?API_KEY=abc123&foo=1"))
+                .isEqualTo("GET /x?api_key=REDACTED&foo=1");
+        // Over-long bodies are truncated to 512 chars plus a marker.
+        String truncated = OpenDotaClient.sanitizeUpstream("w".repeat(1000));
+        assertThat(truncated).hasSize(512 + "...(truncated)".length()).endsWith("...(truncated)");
+    }
+
+    @Test
     void concurrentIdenticalRequestsShareOneUpstreamCall() throws Exception {
         // Single-flight: concurrent misses on the same key must collapse to one
         // upstream GET (the rest await the leader's result).

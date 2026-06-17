@@ -1,17 +1,22 @@
 package com.raorbit.opendota.client;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.http.HttpResponse.BodyHandlers;
+import java.net.http.HttpResponse.BodySubscriber;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
 
 /**
  * Thin HTTP client for the OpenDota API.
@@ -36,6 +41,12 @@ public class OpenDotaClient implements AutoCloseable {
     private static final Duration DEFAULT_RATE_LIMIT_BUDGET = Duration.ofSeconds(10);
     /** Default maximum number of cached responses retained before eviction. */
     private static final int DEFAULT_CACHE_MAX_ENTRIES = 4096;
+    /** Default approximate upper bound on total bytes of cached response bodies. */
+    private static final long DEFAULT_CACHE_MAX_BYTES = 64L * 1024 * 1024;
+    /** Default maximum size of a single upstream response body before it is aborted. */
+    private static final int DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+    /** Maximum length of an upstream error body surfaced in the error envelope. */
+    private static final int MAX_UPSTREAM_SNIPPET = 512;
 
     private final String apiKey;
     private final boolean keyed;
@@ -43,6 +54,12 @@ public class OpenDotaClient implements AutoCloseable {
     private final HttpClient httpClient;
     private final RateLimiter rateLimiter;
     private final TtlCache cache;
+    /**
+     * Upper bound, in bytes, on a single upstream response body. A response larger
+     * than this is aborted mid-stream rather than buffered, so a hostile or
+     * misbehaving upstream cannot exhaust the heap.
+     */
+    private final int maxResponseBytes;
     /**
      * Upper bound on time a request may spend waiting for a rate-limit permit.
      * Kept comfortably under typical MCP client request timeouts so an exhausted
@@ -53,15 +70,19 @@ public class OpenDotaClient implements AutoCloseable {
     private final ConcurrentHashMap<String, CompletableFuture<String>> inFlight = new ConcurrentHashMap<>();
 
     public OpenDotaClient(String apiKey) {
-        this(apiKey, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_RATE_LIMIT_BUDGET);
+        this(apiKey, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
+                DEFAULT_RATE_LIMIT_BUDGET, DEFAULT_MAX_RESPONSE_BYTES);
     }
 
     /**
-     * @param cacheMaxEntries maximum cached responses retained before eviction
-     * @param rateLimitBudget maximum wait for a rate-limit permit before failing fast
+     * @param cacheMaxEntries  maximum cached responses retained before eviction
+     * @param cacheMaxBytes    approximate maximum total bytes of cached bodies
+     * @param rateLimitBudget  maximum wait for a rate-limit permit before failing fast
+     * @param maxResponseBytes maximum size of a single upstream response body
      */
-    public OpenDotaClient(String apiKey, int cacheMaxEntries, Duration rateLimitBudget) {
-        this(apiKey, DEFAULT_BASE, cacheMaxEntries, rateLimitBudget);
+    public OpenDotaClient(String apiKey, int cacheMaxEntries, long cacheMaxBytes,
+                          Duration rateLimitBudget, int maxResponseBytes) {
+        this(apiKey, DEFAULT_BASE, cacheMaxEntries, cacheMaxBytes, rateLimitBudget, maxResponseBytes);
     }
 
     /**
@@ -70,10 +91,18 @@ public class OpenDotaClient implements AutoCloseable {
      * here with the real OpenDota base.
      */
     OpenDotaClient(String apiKey, String baseUrl) {
-        this(apiKey, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_RATE_LIMIT_BUDGET);
+        this(apiKey, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
+                DEFAULT_RATE_LIMIT_BUDGET, DEFAULT_MAX_RESPONSE_BYTES);
     }
 
-    OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, Duration rateLimitBudget) {
+    /** Package-private constructor for tests that need to override the response-size cap. */
+    OpenDotaClient(String apiKey, String baseUrl, int maxResponseBytes) {
+        this(apiKey, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
+                DEFAULT_RATE_LIMIT_BUDGET, maxResponseBytes);
+    }
+
+    OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, long cacheMaxBytes,
+                   Duration rateLimitBudget, int maxResponseBytes) {
         String trimmed = apiKey == null ? null : apiKey.trim();
         if (trimmed != null && trimmed.isEmpty()) {
             trimmed = null;
@@ -85,8 +114,9 @@ public class OpenDotaClient implements AutoCloseable {
                 .connectTimeout(CONNECT_TIMEOUT)
                 .build();
         this.rateLimiter = new RateLimiter(keyed ? 300 : 60);
-        this.cache = new TtlCache(cacheMaxEntries);
+        this.cache = new TtlCache(cacheMaxEntries, cacheMaxBytes);
         this.rateLimitBudget = rateLimitBudget == null ? DEFAULT_RATE_LIMIT_BUDGET : rateLimitBudget;
+        this.maxResponseBytes = maxResponseBytes > 0 ? maxResponseBytes : DEFAULT_MAX_RESPONSE_BYTES;
     }
 
     /**
@@ -185,7 +215,12 @@ public class OpenDotaClient implements AutoCloseable {
                 .build();
 
         try {
-            HttpResponse<String> response = httpClient.send(request, BodyHandlers.ofString());
+            // A size-capped subscriber (rather than BodyHandlers.ofString) so a
+            // hostile/oversized upstream body cannot exhaust the heap. The body is
+            // still delivered through the client's subscriber pipeline, so the
+            // request timeout continues to bound delivery.
+            HttpResponse<String> response =
+                    httpClient.send(request, info -> new CappedBodySubscriber(maxResponseBytes));
             int status = response.statusCode();
             String body = response.body();
             if (status >= 200 && status <= 299) {
@@ -194,14 +229,48 @@ public class OpenDotaClient implements AutoCloseable {
                 }
                 return body;
             }
-            throw new OpenDotaException(status, path, body);
+            // Redact and bound the error body before it reaches the error envelope.
+            throw new OpenDotaException(status, path, sanitizeUpstream(body));
         } catch (IOException e) {
+            if (isResponseTooLarge(e)) {
+                throw new OpenDotaException(0, path,
+                        "upstream response exceeded " + maxResponseBytes + "-byte cap");
+            }
             // Do NOT include the URL/api_key in the message.
             throw new OpenDotaException(0, path, "request failed: " + e.getClass().getSimpleName(), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new OpenDotaException(0, path, "request interrupted", e);
         }
+    }
+
+    /** True if {@code t} or any of its causes is a {@link ResponseTooLargeException}. */
+    private static boolean isResponseTooLarge(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof ResponseTooLargeException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Redact credential echoes and bound the length of an upstream response body
+     * before it is surfaced (via {@link OpenDotaException}) into the error envelope
+     * returned to the MCP client. Applied only to error (non-2xx) bodies; the 2xx
+     * raw-JSON passthrough is never altered. A hostile upstream that echoes the
+     * inbound request URL therefore cannot leak the appended {@code api_key}, and
+     * an oversized error body cannot be copied wholesale into the envelope.
+     */
+    static String sanitizeUpstream(String body) {
+        if (body == null) {
+            return null;
+        }
+        String redacted = body.replaceAll("(?i)api_key=[^&\\s\"]*", "api_key=REDACTED");
+        if (redacted.length() > MAX_UPSTREAM_SNIPPET) {
+            redacted = redacted.substring(0, MAX_UPSTREAM_SNIPPET) + "...(truncated)";
+        }
+        return redacted;
     }
 
     /** Release the underlying {@link HttpClient}'s transport resources on shutdown. */
@@ -263,5 +332,73 @@ public class OpenDotaClient implements AutoCloseable {
             return Duration.ofSeconds(15);
         }
         return Duration.ofSeconds(30);
+    }
+
+    /** Signals that an upstream body exceeded the configured size cap. */
+    private static final class ResponseTooLargeException extends IOException {
+        ResponseTooLargeException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * A {@link BodySubscriber} that accumulates the response into memory but aborts
+     * once more than {@code cap} bytes have arrived, cancelling the subscription and
+     * failing with {@link ResponseTooLargeException}. Used in place of
+     * {@code BodyHandlers.ofString()} so an oversized upstream response is bounded
+     * to roughly {@code cap} bytes rather than buffered in full.
+     */
+    private static final class CappedBodySubscriber implements BodySubscriber<String> {
+
+        private final long cap;
+        private final CompletableFuture<String> result = new CompletableFuture<>();
+        private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        private long total;
+        private Flow.Subscription subscription;
+
+        CappedBodySubscriber(long cap) {
+            this.cap = cap;
+        }
+
+        @Override
+        public CompletionStage<String> getBody() {
+            return result;
+        }
+
+        @Override
+        public void onSubscribe(Flow.Subscription subscription) {
+            this.subscription = subscription;
+            subscription.request(Long.MAX_VALUE);
+        }
+
+        @Override
+        public void onNext(List<ByteBuffer> buffers) {
+            if (result.isDone()) {
+                return;
+            }
+            for (ByteBuffer b : buffers) {
+                int remaining = b.remaining();
+                total += remaining;
+                if (total > cap) {
+                    subscription.cancel();
+                    result.completeExceptionally(
+                            new ResponseTooLargeException("upstream response exceeded " + cap + "-byte cap"));
+                    return;
+                }
+                byte[] chunk = new byte[remaining];
+                b.get(chunk);
+                buffer.write(chunk, 0, remaining);
+            }
+        }
+
+        @Override
+        public void onError(Throwable throwable) {
+            result.completeExceptionally(throwable);
+        }
+
+        @Override
+        public void onComplete() {
+            result.complete(buffer.toString(StandardCharsets.UTF_8));
+        }
     }
 }
