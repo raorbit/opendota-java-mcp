@@ -92,4 +92,31 @@ class MatchToolsTest {
                 .contains("\"isError\":true")
                 .contains("\"status\":429");
     }
+
+    @Test
+    void queryBuilderUrlEncodesValues() {
+        // All current callers pass numerics (which encode to themselves), so the
+        // encoding is otherwise unobservable. Exercise it directly with a value
+        // containing query-significant characters.
+        MatchTools.QueryBuilder qb = new MatchTools.QueryBuilder("/publicMatches");
+        qb.append("note", "a b&c=d");
+
+        assertThat(qb.build()).isEqualTo("/publicMatches?note=a+b%26c%3Dd");
+    }
+
+    @Test
+    void getMatchReturnsInternalErrorEnvelopeOnRuntimeException() throws Exception {
+        // An unexpected unchecked failure must still yield a clean envelope, not throw.
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenThrow(new IllegalStateException("boom"));
+        MatchTools tools = new MatchTools(client);
+
+        String result = tools.getMatch(123L);
+
+        assertThat(result)
+                .contains("\"isError\":true")
+                .contains("\"status\":500")
+                .contains("\"error\":\"internal error\"")
+                .doesNotContain("boom");
+    }
 }

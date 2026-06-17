@@ -17,7 +17,8 @@ public class McpToolConfig {
     @Bean(destroyMethod = "close")
     OpenDotaClient openDotaClient(OpenDotaProperties properties) {
         return new OpenDotaClient(System.getenv("OPENDOTA_API_KEY"),
-                properties.getCacheMaxEntries(), properties.getRateLimitBudget());
+                properties.getCacheMaxEntries(), properties.getCacheMaxBytes(),
+                properties.getRateLimitBudget(), properties.getMaxResponseBytes());
     }
 
     @Bean

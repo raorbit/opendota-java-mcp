@@ -254,6 +254,155 @@ class OpenDotaClientTest {
     }
 
     @Test
+    void oversizedResponseBodyIsAbortedNotBuffered() {
+        // Body (4 KB) far exceeds the 1 KB cap, so the read is aborted and mapped
+        // to a transport-level (statusCode 0) error rather than buffered.
+        stub("/api/heroes", 200, "x".repeat(4096));
+
+        OpenDotaClient client = new OpenDotaClient(null, base, 1024);
+
+        assertThatThrownBy(() -> client.getJson("/heroes"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(0);
+                    assertThat(e.responseBody()).contains("exceeded").contains("cap");
+                });
+    }
+
+    @Test
+    void responseBodyJustUnderCapStillSucceeds() throws Exception {
+        String body = "y".repeat(900);
+        stub("/api/heroes", 200, body);
+
+        OpenDotaClient client = new OpenDotaClient(null, base, 1024);
+
+        assertThat(client.getJson("/heroes")).isEqualTo(body);
+    }
+
+    @Test
+    void responseBodyExactlyAtCapSucceeds() throws Exception {
+        // The cap aborts on total > cap, so a body of EXACTLY cap bytes must pass.
+        String body = "y".repeat(1024);
+        stub("/api/heroes", 200, body);
+
+        OpenDotaClient client = new OpenDotaClient(null, base, 1024);
+
+        assertThat(client.getJson("/heroes")).isEqualTo(body);
+    }
+
+    @Test
+    void responseBodyOneOverCapIsAborted() {
+        // One byte past the cap must abort, pinning the >/>= decision boundary.
+        stub("/api/heroes", 200, "y".repeat(1025));
+
+        OpenDotaClient client = new OpenDotaClient(null, base, 1024);
+
+        assertThatThrownBy(() -> client.getJson("/heroes"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(0);
+                    assertThat(e.responseBody()).contains("exceeded").contains("cap");
+                });
+    }
+
+    @Test
+    void nonPositiveMaxResponseBytesIsRejected() {
+        // Invalid tunables fail fast (uniformly with the cache bounds) rather than
+        // being silently coerced.
+        assertThatThrownBy(() -> new OpenDotaClient(null, base, 0L))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void excessiveMaxResponseBytesIsRejected() {
+        // An absurd cap (here 512 MiB, over the 256 MiB ceiling) is rejected so it
+        // can never drive the read buffer into an OutOfMemoryError.
+        assertThatThrownBy(() -> new OpenDotaClient(null, base, 512L * 1024 * 1024))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void errorBodyApiKeyIsRedactedAndTruncatedInEnvelope() {
+        // A hostile/echoing upstream returns a 500 whose body contains the inbound
+        // api_key and is longer than the 512-char snippet bound.
+        String errorBody = "api_key=SUPERSECRET denied " + "z".repeat(600);
+        stub("/api/players/777", 500, errorBody);
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThatThrownBy(() -> client.getJson("/players/777"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(500);
+                    assertThat(e.responseBody())
+                            .contains("api_key=REDACTED")
+                            .doesNotContain("SUPERSECRET")
+                            .endsWith("...(truncated)");
+                    assertThat(e.responseBody().length()).isLessThanOrEqualTo(512 + "...(truncated)".length());
+                });
+    }
+
+    @Test
+    void sanitizeUpstreamRedactsTruncatesAndIsNullSafe() {
+        assertThat(OpenDotaClient.sanitizeUpstream(null)).isNull();
+        // A clean, short body is returned unchanged.
+        assertThat(OpenDotaClient.sanitizeUpstream("{\"error\":\"Not Found\"}"))
+                .isEqualTo("{\"error\":\"Not Found\"}");
+        // api_key=... is redacted regardless of case, stopping at a delimiter.
+        assertThat(OpenDotaClient.sanitizeUpstream("GET /x?API_KEY=abc123&foo=1"))
+                .isEqualTo("GET /x?api_key=REDACTED&foo=1");
+        // Over-long bodies are truncated to 512 chars plus a marker.
+        String truncated = OpenDotaClient.sanitizeUpstream("w".repeat(1000));
+        assertThat(truncated).hasSize(512 + "...(truncated)".length()).endsWith("...(truncated)");
+    }
+
+    @Test
+    void keyedErrorBodyEchoingKeyInJsonFormIsRedacted() throws Exception {
+        // A hostile/buggy upstream echoes the credential in JSON form (colon, not
+        // 'api_key='), which the pattern alone would miss. Scrubbing the actual key
+        // value must still keep it out of the error envelope.
+        String apiKey = "00000000-1111-2222-3333-444444444444";
+        String errorBody = "{\"error\":\"invalid api_key: " + apiKey + "\"}";
+        stub("/api/players/777", 401, errorBody);
+
+        OpenDotaClient client = new OpenDotaClient(apiKey, base);
+
+        assertThatThrownBy(() -> client.getJson("/players/777"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(401);
+                    assertThat(e.responseBody())
+                            .doesNotContain(apiKey)
+                            .contains("REDACTED");
+                });
+    }
+
+    @Test
+    void keyedErrorBodyEchoingEncodedKeyIsRedacted() throws Exception {
+        // A key with URL-illegal chars is sent percent/form-encoded; an upstream that
+        // reflects the ENCODED value WITHOUT the api_key= prefix would slip past the
+        // pattern, so the encoded form must be scrubbed by literal value too.
+        String apiKey = "secret key+1";
+        String errorBody = "{\"error\":\"rejected token " + OpenDotaClient.encode(apiKey) + "\"}";
+        stub("/api/players/777", 403, errorBody);
+
+        OpenDotaClient client = new OpenDotaClient(apiKey, base);
+
+        assertThatThrownBy(() -> client.getJson("/players/777"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.responseBody())
+                            .doesNotContain(OpenDotaClient.encode(apiKey))
+                            .contains("REDACTED");
+                });
+    }
+
+    @Test
     void concurrentIdenticalRequestsShareOneUpstreamCall() throws Exception {
         // Single-flight: concurrent misses on the same key must collapse to one
         // upstream GET (the rest await the leader's result).

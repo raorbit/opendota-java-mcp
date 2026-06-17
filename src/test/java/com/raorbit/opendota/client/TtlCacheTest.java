@@ -92,6 +92,28 @@ class TtlCacheTest {
     }
 
     @Test
+    void evictsByByteBudgetEvenWhenUnderEntryCount() {
+        // High entry cap, low byte budget (20): the byte bound drives eviction.
+        TtlCache cache = new TtlCache(10_000, 20);
+        cache.put("a", "0123456789", Duration.ofSeconds(30));    // 10 bytes, expires soonest
+        cache.put("b", "0123456789", Duration.ofSeconds(120));   // 10 bytes -> total 20, at budget
+        // Adding a third 10-byte value pushes total to 30 > 20, so the
+        // nearest-to-expiry live entry ("a") is evicted back under budget.
+        cache.put("c", "0123456789", Duration.ofSeconds(120));
+        assertThat(cache.get("a")).isNull();
+        assertThat(cache.get("b")).isEqualTo("0123456789");
+        assertThat(cache.get("c")).isEqualTo("0123456789");
+    }
+
+    @Test
+    void valueLargerThanByteBudgetIsNotCached() {
+        TtlCache cache = new TtlCache(10_000, 5);
+        // A single value bigger than the whole budget cannot be cached at all.
+        cache.put("big", "0123456789", Duration.ofSeconds(120));
+        assertThat(cache.get("big")).isNull();
+    }
+
+    @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void concurrentPutAndGetIsThreadSafe() throws Exception {
         TtlCache cache = new TtlCache(10_000);

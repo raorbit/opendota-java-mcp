@@ -30,6 +30,8 @@ public class MatchTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -43,6 +45,8 @@ public class MatchTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -62,6 +66,8 @@ public class MatchTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -73,15 +79,22 @@ public class MatchTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
     /**
      * Accumulates query parameters onto a base path, appending each only when
      * its value is non-null. The first appended param uses {@code '?'} and the
-     * rest use {@code '&'}. Numeric values need no URL-encoding.
+     * rest use {@code '&'}. Values are URL-encoded so the helper can never become
+     * a query-injection sink: today's callers pass only numeric values (left
+     * byte-for-byte unchanged by the encoder), but a future non-numeric parameter
+     * is then automatically safe.
+     *
+     * <p>Package-private (not {@code private}) so its encoding can be unit-tested directly.
      */
-    private static final class QueryBuilder {
+    static final class QueryBuilder {
 
         private final StringBuilder sb;
         private boolean first = true;
@@ -94,7 +107,8 @@ public class MatchTools {
             if (value == null) {
                 return;
             }
-            sb.append(first ? '?' : '&').append(name).append('=').append(value);
+            sb.append(first ? '?' : '&').append(name).append('=')
+                    .append(OpenDotaClient.encode(String.valueOf(value)));
             first = false;
         }
 

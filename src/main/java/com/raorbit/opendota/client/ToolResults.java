@@ -39,6 +39,16 @@ public final class ToolResults {
     }
 
     /**
+     * Build the JSON error envelope for an unexpected internal failure (status 500).
+     * The exception itself is intentionally not surfaced, so an unexpected
+     * unchecked error cannot leak internal details to the client.
+     */
+    public static String internalError(String endpoint) {
+        return "{\"error\":\"internal error\",\"status\":500,\"endpoint\":\""
+                + escape(endpoint) + "\",\"isError\":true}";
+    }
+
+    /**
      * Escape a string for inclusion inside a JSON string literal (without the
      * surrounding quotes). Handles {@code null} defensively by returning an
      * empty string.
@@ -61,6 +71,17 @@ public final class ToolResults {
                         sb.append("\\u00")
                           .append(HEX[(c >> 4) & 0xF])
                           .append(HEX[c & 0xF]);
+                    } else if (Character.isHighSurrogate(c)) {
+                        // Keep a well-formed pair together; replace an unpaired high
+                        // surrogate (e.g. from a snippet truncated mid-pair) with
+                        // U+FFFD so the envelope is always valid Unicode.
+                        if (i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1))) {
+                            sb.append(c).append(value.charAt(++i));
+                        } else {
+                            sb.append((char) 0xFFFD);
+                        }
+                    } else if (Character.isLowSurrogate(c)) {
+                        sb.append((char) 0xFFFD);
                     } else {
                         sb.append(c);
                     }
