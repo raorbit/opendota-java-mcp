@@ -6,15 +6,18 @@ import com.raorbit.opendota.tools.MatchTools;
 import com.raorbit.opendota.tools.PlayerTools;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@EnableConfigurationProperties(OpenDotaProperties.class)
 public class McpToolConfig {
 
-    @Bean
-    OpenDotaClient openDotaClient() {
-        return new OpenDotaClient(System.getenv("OPENDOTA_API_KEY"));
+    @Bean(destroyMethod = "close")
+    OpenDotaClient openDotaClient(OpenDotaProperties properties) {
+        return new OpenDotaClient(System.getenv("OPENDOTA_API_KEY"),
+                properties.getCacheMaxEntries(), properties.getRateLimitBudget());
     }
 
     @Bean

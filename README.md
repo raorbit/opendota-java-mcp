@@ -117,6 +117,16 @@ export OPENDOTA_API_KEY=00000000-0000-0000-0000-000000000000
 > only. Never commit it to source control or paste it into a config file that is
 > checked in.
 
+### Client tuning (optional)
+
+Two client internals can be tuned via standard Spring properties (environment
+variables, JVM `-D` flags, or an external `application.properties`):
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `opendota.cache-max-entries` | `4096` | Max cached responses retained before the nearest-to-expiry entry is evicted. |
+| `opendota.rate-limit-budget` | `10s` | Max time a request waits for a rate-limit permit before returning a rate-limited error. |
+
 ### Steam32 account IDs
 
 OpenDota identifies players by their **Steam32** `account_id`, which is the

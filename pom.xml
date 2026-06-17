@@ -69,6 +69,16 @@
             <scope>test</scope>
         </dependency>
         <!--
+          Already present transitively via spring-boot-starter-test; declared
+          explicitly (version still managed by the Spring Boot parent) so the
+          surefire argLine below can resolve its jar path for the -javaagent.
+        -->
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
           NOTE: org.wiremock:wiremock was intentionally removed. WireMock 3.13.2
           bundles a Jetty 11 HTTP server, but Spring Boot 3.5.15's dependency
           management force-upgrades Jetty to 12 (incompatible Handler API), so
@@ -83,6 +93,35 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!--
+              Exposes each dependency's jar path as a ${groupId:artifactId:type}
+              property so the surefire argLine below can point -javaagent at the
+              resolved mockito-core jar.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                      Load Mockito as a Java agent explicitly. Its inline mock-maker
+                      otherwise self-attaches at runtime, which the JDK warns about
+                      and will disallow in a future release. -Xshare:off silences the
+                      CDS warning that appending to the bootstrap classpath triggers.
+                    -->
+                    <argLine>-javaagent:${org.mockito:mockito-core:jar} -Xshare:off</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>

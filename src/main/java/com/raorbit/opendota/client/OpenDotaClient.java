@@ -32,12 +32,10 @@ public class OpenDotaClient implements AutoCloseable {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
-    /**
-     * Upper bound on time a request may spend waiting for a rate-limit permit.
-     * Kept comfortably under typical MCP client request timeouts so an exhausted
-     * bucket fails fast with an error envelope instead of parking indefinitely.
-     */
-    private static final Duration RATE_LIMIT_BUDGET = Duration.ofSeconds(10);
+    /** Default upper bound on time a request waits for a rate-limit permit. */
+    private static final Duration DEFAULT_RATE_LIMIT_BUDGET = Duration.ofSeconds(10);
+    /** Default maximum number of cached responses retained before eviction. */
+    private static final int DEFAULT_CACHE_MAX_ENTRIES = 4096;
 
     private final String apiKey;
     private final boolean keyed;
@@ -45,19 +43,37 @@ public class OpenDotaClient implements AutoCloseable {
     private final HttpClient httpClient;
     private final RateLimiter rateLimiter;
     private final TtlCache cache;
+    /**
+     * Upper bound on time a request may spend waiting for a rate-limit permit.
+     * Kept comfortably under typical MCP client request timeouts so an exhausted
+     * bucket fails fast with an error envelope instead of parking indefinitely.
+     */
+    private final Duration rateLimitBudget;
     /** In-flight cacheable fetches, so concurrent identical requests share one call. */
     private final ConcurrentHashMap<String, CompletableFuture<String>> inFlight = new ConcurrentHashMap<>();
 
     public OpenDotaClient(String apiKey) {
-        this(apiKey, DEFAULT_BASE);
+        this(apiKey, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_RATE_LIMIT_BUDGET);
+    }
+
+    /**
+     * @param cacheMaxEntries maximum cached responses retained before eviction
+     * @param rateLimitBudget maximum wait for a rate-limit permit before failing fast
+     */
+    public OpenDotaClient(String apiKey, int cacheMaxEntries, Duration rateLimitBudget) {
+        this(apiKey, DEFAULT_BASE, cacheMaxEntries, rateLimitBudget);
     }
 
     /**
      * Package-private constructor allowing the API base URL to be overridden
-     * (e.g. pointed at a local WireMock server in tests). The public
-     * {@link #OpenDotaClient(String)} delegates here with the real OpenDota base.
+     * (e.g. pointed at a local server in tests). The public constructors delegate
+     * here with the real OpenDota base.
      */
     OpenDotaClient(String apiKey, String baseUrl) {
+        this(apiKey, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_RATE_LIMIT_BUDGET);
+    }
+
+    OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, Duration rateLimitBudget) {
         String trimmed = apiKey == null ? null : apiKey.trim();
         if (trimmed != null && trimmed.isEmpty()) {
             trimmed = null;
@@ -69,7 +85,8 @@ public class OpenDotaClient implements AutoCloseable {
                 .connectTimeout(CONNECT_TIMEOUT)
                 .build();
         this.rateLimiter = new RateLimiter(keyed ? 300 : 60);
-        this.cache = new TtlCache();
+        this.cache = new TtlCache(cacheMaxEntries);
+        this.rateLimitBudget = rateLimitBudget == null ? DEFAULT_RATE_LIMIT_BUDGET : rateLimitBudget;
     }
 
     /**
@@ -143,14 +160,14 @@ public class OpenDotaClient implements AutoCloseable {
     private String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
         boolean acquired;
         try {
-            acquired = rateLimiter.tryAcquire(RATE_LIMIT_BUDGET);
+            acquired = rateLimiter.tryAcquire(rateLimitBudget);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new OpenDotaException(0, path, "request interrupted", ie);
         }
         if (!acquired) {
             throw new OpenDotaException(429, path,
-                    "client-side rate limit: no permit within " + RATE_LIMIT_BUDGET.toSeconds() + "s");
+                    "client-side rate limit: no permit within " + rateLimitBudget.toSeconds() + "s");
         }
 
         String url = base + path;
