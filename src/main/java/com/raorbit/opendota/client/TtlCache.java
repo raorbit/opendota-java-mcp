@@ -1,5 +1,6 @@
 package com.raorbit.opendota.client;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -84,7 +85,9 @@ public final class TtlCache {
         if (key == null || json == null || ttl == null || ttl.isZero() || ttl.isNegative()) {
             return;
         }
-        int size = json.length();
+        // Measure real UTF-8 bytes (not UTF-16 char count) so this budget uses the
+        // same unit as the documented byte bound and the response-size cap.
+        int size = json.getBytes(StandardCharsets.UTF_8).length;
         // Per-entry ceiling: a single body too large to ever fit the budget is
         // not cached, so it cannot dominate or thrash the cache.
         if (size > maxBytes) {
