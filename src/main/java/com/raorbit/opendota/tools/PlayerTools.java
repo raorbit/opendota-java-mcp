@@ -34,6 +34,8 @@ public class PlayerTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -45,6 +47,8 @@ public class PlayerTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -72,6 +76,8 @@ public class PlayerTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -83,6 +89,8 @@ public class PlayerTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -112,6 +120,8 @@ public class PlayerTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 
@@ -129,6 +139,8 @@ public class PlayerTools {
             return client.getJson(path);
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
         }
     }
 

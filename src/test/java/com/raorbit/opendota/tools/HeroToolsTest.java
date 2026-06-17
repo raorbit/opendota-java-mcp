@@ -93,4 +93,19 @@ class HeroToolsTest {
                 .contains("\"isError\":true")
                 .contains("\"status\":429");
     }
+
+    @Test
+    void getConstantsReturnsInternalErrorEnvelopeOnRuntimeException() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenThrow(new IllegalStateException("boom"));
+        HeroTools tools = new HeroTools(client);
+
+        String result = tools.getConstants("items");
+
+        assertThat(result)
+                .contains("\"isError\":true")
+                .contains("\"status\":500")
+                .contains("\"error\":\"internal error\"")
+                .doesNotContain("boom");
+    }
 }

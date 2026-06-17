@@ -110,4 +110,19 @@ class PlayerToolsTest {
                 .contains("\"isError\":true")
                 .contains("\"status\":429");
     }
+
+    @Test
+    void getPlayerReturnsInternalErrorEnvelopeOnRuntimeException() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenThrow(new IllegalStateException("boom"));
+        PlayerTools tools = new PlayerTools(client);
+
+        String result = tools.getPlayer(123L);
+
+        assertThat(result)
+                .contains("\"isError\":true")
+                .contains("\"status\":500")
+                .contains("\"error\":\"internal error\"")
+                .doesNotContain("boom");
+    }
 }

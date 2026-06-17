@@ -57,4 +57,15 @@ class ToolResultsTest {
                 .contains("\"error\":\"hero_id is required\"")
                 .contains("\"isError\":true");
     }
+
+    @Test
+    void internalErrorBuildsStatus500EnvelopeWithoutLeakingDetails() {
+        String json = ToolResults.internalError("/players/123");
+
+        assertThat(json)
+                .contains("\"status\":500")
+                .contains("\"endpoint\":\"/players/123\"")
+                .contains("\"error\":\"internal error\"")
+                .contains("\"isError\":true");
+    }
 }

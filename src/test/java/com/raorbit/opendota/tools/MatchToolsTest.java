@@ -92,4 +92,20 @@ class MatchToolsTest {
                 .contains("\"isError\":true")
                 .contains("\"status\":429");
     }
+
+    @Test
+    void getMatchReturnsInternalErrorEnvelopeOnRuntimeException() throws Exception {
+        // An unexpected unchecked failure must still yield a clean envelope, not throw.
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenThrow(new IllegalStateException("boom"));
+        MatchTools tools = new MatchTools(client);
+
+        String result = tools.getMatch(123L);
+
+        assertThat(result)
+                .contains("\"isError\":true")
+                .contains("\"status\":500")
+                .contains("\"error\":\"internal error\"")
+                .doesNotContain("boom");
+    }
 }

@@ -39,6 +39,16 @@ public final class ToolResults {
     }
 
     /**
+     * Build the JSON error envelope for an unexpected internal failure (status 500).
+     * The exception itself is intentionally not surfaced, so an unexpected
+     * unchecked error cannot leak internal details to the client.
+     */
+    public static String internalError(String endpoint) {
+        return "{\"error\":\"internal error\",\"status\":500,\"endpoint\":\""
+                + escape(endpoint) + "\",\"isError\":true}";
+    }
+
+    /**
      * Escape a string for inclusion inside a JSON string literal (without the
      * surrounding quotes). Handles {@code null} defensively by returning an
      * empty string.
