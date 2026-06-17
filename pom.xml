@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.15</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.raorbit</groupId>
+    <artifactId>opendota-mcp</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>opendota-mcp</name>
+    <description>OpenDota MCP server (stdio transport) built on Spring AI</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>1.1.8</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!--
+              The MCP SDK 0.18.3 (mcp-json-jackson2) requires
+              com.networknt:json-schema-validator:2.0.0 (class
+              com.networknt.schema.dialect.Dialects). Spring Boot 3.5.15's
+              dependency management pins it to 1.5.9, which lacks that class and
+              causes a NoClassDefFoundError at server startup. Align it to 2.0.0
+              (version-only override; no new/banned dependency introduced).
+            -->
+            <dependency>
+                <groupId>com.networknt</groupId>
+                <artifactId>json-schema-validator</artifactId>
+                <version>2.0.0</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-mcp-server</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          NOTE: org.wiremock:wiremock was intentionally removed. WireMock 3.13.2
+          bundles a Jetty 11 HTTP server, but Spring Boot 3.5.15's dependency
+          management force-upgrades Jetty to 12 (incompatible Handler API), so
+          WireMock fails to start on this classpath. OpenDotaClientTest uses the
+          JDK's com.sun.net.httpserver.HttpServer instead (zero extra deps). If a
+          full mock server is ever needed, use wiremock-standalone (shaded Jetty).
+        -->
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
