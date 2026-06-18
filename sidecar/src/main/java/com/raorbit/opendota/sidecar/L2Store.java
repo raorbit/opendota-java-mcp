@@ -1,6 +1,7 @@
 package com.raorbit.opendota.sidecar;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -38,7 +39,8 @@ public final class L2Store implements AutoCloseable {
 
     // O(1) running totals so enforceCaps() avoids full-table COUNT/SUM scans on the request path
     // (spec §6.4). Seeded once on open, then maintained by put/evictOldest/patchBust under the
-    // connection monitor. The byte total mirrors SQLite's char-based LENGTH(); approximate by design.
+    // connection monitor. Bytes are real UTF-8 bytes on every axis — Java getBytes(UTF_8).length on
+    // insert, SQLite LENGTH(CAST(body AS BLOB)) on seed/evict — so the total can't drift on non-ASCII.
     private final AtomicLong currentRows = new AtomicLong();
     private final AtomicLong currentBytes = new AtomicLong();
 
@@ -147,11 +149,16 @@ public final class L2Store implements AutoCloseable {
         }
     }
 
+    /** UTF-8 byte length of a body — matches SQLite {@code LENGTH(CAST(body AS BLOB))} and TtlCache. */
+    private static long utf8Len(String s) {
+        return s.getBytes(StandardCharsets.UTF_8).length;
+    }
+
     /** Seed the running row/byte totals from the table once, after migration. */
     private void initCounters() throws SQLException {
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
-                     "SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries")) {
+                     "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM cache_entries")) {
             if (rs.next()) {
                 currentRows.set(rs.getLong(1));
                 currentBytes.set(rs.getLong(2));
@@ -199,7 +206,7 @@ public final class L2Store implements AutoCloseable {
         long oldBytes = 0L;
         boolean existed = false;
         try (PreparedStatement sel = conn.prepareStatement(
-                "SELECT LENGTH(body) FROM cache_entries WHERE path = ?")) {
+                "SELECT LENGTH(CAST(body AS BLOB)) FROM cache_entries WHERE path = ?")) {
             sel.setString(1, path);
             try (ResultSet rs = sel.executeQuery()) {
                 if (rs.next()) {
@@ -232,7 +239,7 @@ public final class L2Store implements AutoCloseable {
         if (!existed) {
             currentRows.incrementAndGet();
         }
-        currentBytes.addAndGet((long) body.length() - oldBytes);
+        currentBytes.addAndGet(utf8Len(body) - oldBytes);
     }
 
     /** Current number of rows in {@code cache_entries} (O(1) running total, maintained on writes). */
@@ -259,25 +266,22 @@ public final class L2Store implements AutoCloseable {
         if (n <= 0) {
             return 0;
         }
-        // Sum the bytes of the soon-to-be-deleted oldest rows (bounded by n via the stored_at index)
-        // so the running byte total stays accurate after the delete.
-        long freedBytes = 0L;
-        String sumSql = "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries WHERE path IN "
-                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)";
-        try (PreparedStatement ps = conn.prepareStatement(sumSql)) {
-            ps.setInt(1, n);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    freedBytes = rs.getLong(1);
-                }
-            }
-        }
+        // Delete the n oldest rows AND sum their byte sizes in one statement via RETURNING, so the
+        // summed and deleted rows are guaranteed identical even when stored_at values tie (a separate
+        // SUM subquery could break the LIMIT tie differently from the DELETE and skew the byte total).
         String sql = "DELETE FROM cache_entries WHERE path IN "
-                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)";
-        int deleted;
+                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?) "
+                + "RETURNING LENGTH(CAST(body AS BLOB))";
+        int deleted = 0;
+        long freedBytes = 0L;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, n);
-            deleted = ps.executeUpdate();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    deleted++;
+                    freedBytes += rs.getLong(1);
+                }
+            }
         }
         currentRows.addAndGet(-deleted);
         currentBytes.addAndGet(-freedBytes);
@@ -315,18 +319,17 @@ public final class L2Store implements AutoCloseable {
      * @return the number of rows deleted
      */
     public synchronized int patchBust() throws SQLException {
-        String where = "WHERE classification = 'PERMANENT' AND patch_id IS NOT NULL";
+        // Single DELETE ... RETURNING so the deleted rows and their summed bytes are the same set.
+        String sql = "DELETE FROM cache_entries WHERE classification = 'PERMANENT' AND patch_id IS NOT NULL "
+                + "RETURNING LENGTH(CAST(body AS BLOB))";
+        int deleted = 0;
         long freedBytes = 0L;
         try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(
-                     "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries " + where)) {
-            if (rs.next()) {
-                freedBytes = rs.getLong(1);
+             ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                deleted++;
+                freedBytes += rs.getLong(1);
             }
-        }
-        int deleted;
-        try (Statement st = conn.createStatement()) {
-            deleted = st.executeUpdate("DELETE FROM cache_entries " + where);
         }
         currentRows.addAndGet(-deleted);
         currentBytes.addAndGet(-freedBytes);

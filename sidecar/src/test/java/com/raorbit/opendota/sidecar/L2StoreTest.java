@@ -82,6 +82,28 @@ class L2StoreTest {
     }
 
     @Test
+    void byteTotalTracksUtf8BytesConsistentlyAndZeroesAfterEviction(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // A body with a 4-byte emoji and a 3-byte CJK char: UTF-8 bytes != UTF-16 length != chars,
+            // so a unit mismatch between put (Java) and evict (SQLite) would surface here.
+            String body = "{\"n\":\"😀漢\"}";
+            long expected = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            store.put("/matches/1", body, Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.totalBodyBytes()).isEqualTo(expected);
+
+            // Overwrite with a shorter ASCII body: the running total nets the delta exactly.
+            store.put("/matches/1", "{}", Classification.PERMANENT, 200, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.totalBodyBytes()).isEqualTo(2L);
+
+            // Eviction subtracts the same bytes it deleted (DELETE ... RETURNING), so the total is 0.
+            assertThat(store.evictOldest(1)).isEqualTo(1);
+            assertThat(store.totalBodyBytes()).isZero();
+            assertThat(store.rowCount()).isZero();
+        }
+    }
+
+    @Test
     void patchBustDeletesPatchScopedStaticButNotMatches(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
         try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
