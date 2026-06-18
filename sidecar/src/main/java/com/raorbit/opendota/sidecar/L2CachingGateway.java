@@ -4,6 +4,8 @@ import com.raorbit.opendota.client.OpenDotaClient;
 import com.raorbit.opendota.client.OpenDotaException;
 
 import java.sql.SQLException;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
@@ -36,6 +38,12 @@ public final class L2CachingGateway implements AutoCloseable {
      * (non-null) number. {@code null} or absent ⇒ unparsed.
      */
     private static final Pattern PARSED_VERSION = Pattern.compile("\"version\"\\s*:\\s*-?\\d");
+    /** Latest-patch probe for {@code /constants/patch}: numeric {@code "id"} values (dep-free, not a parse). */
+    private static final Pattern PATCH_ID_NUM = Pattern.compile("\"id\"\\s*:\\s*(\\d+)");
+    /** Precompiled corroborating parse-field probes (the matched key's value must be non-null). */
+    private static final Pattern OD_DATA_KEY = Pattern.compile("\"od_data\"\\s*:\\s*");
+    private static final Pattern OBJECTIVES_KEY = Pattern.compile("\"objectives\"\\s*:\\s*");
+    private static final Pattern PURCHASE_LOG_KEY = Pattern.compile("\"purchase_log\"\\s*:\\s*");
 
     private final OpenDotaClient client;
     private final L2Store store;
@@ -55,6 +63,8 @@ public final class L2CachingGateway implements AutoCloseable {
     private volatile long lastPatchCheckMillis;
     /** Guards a single in-flight patch check so concurrent PERMANENT requests don't all check at once. */
     private final AtomicBoolean patchCheckInProgress = new AtomicBoolean(false);
+    /** Paths with a store in flight, so concurrent single-flight misses collapse to one write. */
+    private final Set<String> storing = ConcurrentHashMap.newKeySet();
 
     public L2CachingGateway(OpenDotaClient client, L2Store store, L2Config config) {
         this.client = client;
@@ -146,6 +156,12 @@ public final class L2CachingGateway implements AutoCloseable {
             l2StoreSkippedUnparsed.incrementAndGet();
             return;
         }
+        // Collapse a burst of concurrent single-flight misses for the same path into ONE write: the
+        // upstream call was already shared, so re-INSERTing the identical row (and bumping l2Store)
+        // once per caller is pure churn on the serialized write connection.
+        if (!storing.add(path)) {
+            return;
+        }
         Long expiresAt = null;   // PERMANENT: never expires by time.
         String patchId = patchScoped ? currentPatchId : null;
         try {
@@ -155,6 +171,8 @@ public final class L2CachingGateway implements AutoCloseable {
             enforceCaps();
         } catch (SQLException ex) {
             recordError("L2 store", path, ex);
+        } finally {
+            storing.remove(path);
         }
     }
 
@@ -242,7 +260,7 @@ public final class L2CachingGateway implements AutoCloseable {
         if (body == null) {
             return null;
         }
-        java.util.regex.Matcher m = Pattern.compile("\"id\"\\s*:\\s*(\\d+)").matcher(body);
+        java.util.regex.Matcher m = PATCH_ID_NUM.matcher(body);
         long max = Long.MIN_VALUE;
         boolean found = false;
         while (m.find()) {
@@ -274,19 +292,18 @@ public final class L2CachingGateway implements AutoCloseable {
         // Corroborating signal: any one of these only appears (non-null) on parsed matches. All three
         // use the non-null check — a bare contains() would wrongly accept "purchase_log":null on an
         // otherwise-unparsed body and pin it PERMANENT forever.
-        return hasNonNullKey(body, "od_data")
-                || hasNonNullKey(body, "objectives")
-                || hasNonNullKey(body, "purchase_log");
+        return hasNonNullValue(body, OD_DATA_KEY)
+                || hasNonNullValue(body, OBJECTIVES_KEY)
+                || hasNonNullValue(body, PURCHASE_LOG_KEY);
     }
 
     /**
-     * True if {@code body} contains a {@code "key"} whose value is not {@code null} (i.e. the next
-     * non-whitespace token after the colon is not the literal {@code null}). A cheap guard so a
+     * True if {@code body} contains a key (matched by the precompiled {@code keyColon} pattern, which
+     * matches {@code "key"\s*:\s*}) whose value is not the literal {@code null}. A cheap guard so a
      * field present but explicitly null does not count.
      */
-    private static boolean hasNonNullKey(String body, String key) {
-        java.util.regex.Matcher m =
-                Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*").matcher(body);
+    private static boolean hasNonNullValue(String body, Pattern keyColon) {
+        java.util.regex.Matcher m = keyColon.matcher(body);
         while (m.find()) {
             int valueStart = m.end();
             if (valueStart >= body.length()) {

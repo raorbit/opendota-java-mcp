@@ -369,6 +369,10 @@ class L2CachingGatewayTest {
             // Exactly one upstream call despite N concurrent L2 misses, and a single stored row.
             assertThat(upstreamHits.get()).isEqualTo(1);
             assertThat(store.rowCount()).isEqualTo(1);
+            // The concurrent misses also collapse to ~one L2 write (not one per caller): the in-flight
+            // store-dedup keeps l2Store at 1 (a rare straggler after the first completes may make 2),
+            // far below the n callers it would otherwise be.
+            assertThat(gw.stats().l2Store()).isLessThanOrEqualTo(2);
         } finally {
             upstream.stop(0);
         }
