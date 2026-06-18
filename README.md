@@ -150,8 +150,10 @@ OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.0.0.jar
 Then point each agent at it by setting `opendota.sidecar-enabled=true` (and leaving
 `OPENDOTA_API_KEY` out of the per-client config). The sidecar binds `127.0.0.1` only,
 exposes `GET /health`, and defaults to port `31337` (override with
-`OPENDOTA_SIDECAR_PORT` or `-Dopendota.sidecar.port=`). If an agent starts before the
-sidecar, it retries the connection briefly. See
+`OPENDOTA_SIDECAR_PORT` or `-Dopendota.sidecar.port=<port>`, and point agents at the same
+port with `opendota.sidecar-port`). If an agent starts before the sidecar, it retries the
+connection briefly. The sidecar has no authentication, so only run it on a host where every
+local user is trusted. See
 [`docs/mcp-registration.md`](docs/mcp-registration.md#shared-sidecar-for-multiple-agents).
 
 ### Steam32 account IDs
