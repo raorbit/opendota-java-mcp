@@ -78,6 +78,52 @@ exporting `OPENDOTA_API_KEY` as a real environment variable in your shell or OS
 keychain and leaving the value in the JSON empty, rather than inlining the secret
 into a file at all.
 
+## Shared sidecar for multiple agents
+
+If you run several agents on one machine that share a single `OPENDOTA_API_KEY`,
+their independent rate limiters can jointly exceed OpenDota's real per-key limit
+(it is enforced per key, not per process). Run the **sidecar** so one local process
+owns the single rate limiter and a shared cache, and have each server forward to it.
+
+1. Build the sidecar (a separate, dependency-light project under `sidecar/`):
+   ```sh
+   mvn -f sidecar/pom.xml clean package
+   # -> sidecar/target/opendota-sidecar-1.0.0.jar
+   ```
+2. Run it once per machine, giving it the key (the agents then do not need one):
+   ```powershell
+   # PowerShell
+   $env:OPENDOTA_API_KEY = '<uuid>'; java -jar sidecar\target\opendota-sidecar-1.0.0.jar
+   ```
+   ```sh
+   # bash
+   OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.0.0.jar
+   ```
+   It binds `127.0.0.1:31337` (override with `OPENDOTA_SIDECAR_PORT` or
+   `-Dopendota.sidecar.port=`) and serves `GET /health`. It is a plain HTTP process,
+   not the stdio transport, so it logs to the console — redirect it to a file if you
+   run it in the background.
+3. Point each client's server at the sidecar by enabling forwarding and **omitting**
+   the key from that client's config (the sidecar holds it):
+   ```json
+   {
+     "mcpServers": {
+       "opendota": {
+         "command": "java",
+         "args": [
+           "-Dopendota.sidecar-enabled=true",
+           "-jar",
+           "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.0.0.jar"
+         ]
+       }
+     }
+   }
+   ```
+   (Or set `opendota.sidecar-enabled=true` via the environment or an external
+   `application.properties`; JVM `-D` flags must come before `-jar`.) An agent that
+   starts before the sidecar retries the connection briefly; if the sidecar is down,
+   tool calls return a clean error rather than failing the session.
+
 ## Running the server directly
 
 You can also launch the jar yourself, for example to smoke-test it before
