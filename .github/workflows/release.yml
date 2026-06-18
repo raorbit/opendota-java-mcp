@@ -1,0 +1,75 @@
+name: release
+
+# Cut a release when a version tag is pushed, e.g. `git tag v1.0.0 && git push origin v1.0.0`.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create the GitHub Release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # Two independent Maven builds (no reactor). The sidecar must be built from the
+      # repo root so ClientCopyDriftTest can resolve the parent dir and compare the
+      # byte-copied client files against the root copies.
+      - name: Build and test the MCP server
+        run: mvn -B clean verify
+
+      - name: Build and test the sidecar
+        run: mvn -B -f sidecar/pom.xml clean verify
+
+      # The sidecar is a plain jar plus a sibling lib/ (its SQLite driver for the optional
+      # durable L2 cache) — package the runnable set as a single zip so it stays together.
+      - name: Package the sidecar (jar + runtime lib) as a zip
+        run: |
+          mkdir -p dist/opendota-sidecar/lib
+          cp sidecar/target/opendota-sidecar-1.0.0.jar dist/opendota-sidecar/
+          cp sidecar/target/lib/*.jar dist/opendota-sidecar/lib/
+          (cd dist && zip -r opendota-sidecar-1.0.0.zip opendota-sidecar)
+
+      # Compute checksums so downloads can be verified.
+      - name: Compute SHA-256 checksums
+        run: |
+          # cd into each dir so the .sha256 records only the basename — otherwise it embeds
+          # target/ and dist/ and `sha256sum -c` fails for downloaders who have the file flat.
+          (cd target && sha256sum opendota-mcp-1.0.0.jar > opendota-mcp-1.0.0.jar.sha256)
+          (cd dist && sha256sum opendota-sidecar-1.0.0.zip > opendota-sidecar-1.0.0.zip.sha256)
+          cat target/opendota-mcp-1.0.0.jar.sha256 dist/opendota-sidecar-1.0.0.zip.sha256
+
+      - name: Create GitHub Release and upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/opendota-mcp-1.0.0.jar
+            target/opendota-mcp-1.0.0.jar.sha256
+            dist/opendota-sidecar-1.0.0.zip
+            dist/opendota-sidecar-1.0.0.zip.sha256
+          body: |
+            This release ships two artifacts that are meant to run together and must stay
+            version-aligned: `opendota-mcp-1.0.0.jar` is the standalone MCP stdio server that
+            an MCP client launches, and `opendota-sidecar-1.0.0.zip` is the shared localhost
+            sidecar — a plain runnable jar plus a `lib/` holding its only runtime dependency
+            (the SQLite driver for the optional durable L2 cache). The MCP server only talks to
+            a sidecar from the same release, so always deploy both from the same tag rather than
+            mixing versions. Unzip the sidecar (keep the jar and its `lib/` together) and start it
+            once per machine before launching the MCP servers (set the API key here, not on the
+            agents), e.g. `OPENDOTA_API_KEY=<uuid> java -jar opendota-sidecar/opendota-sidecar-1.0.0.jar`;
+            it binds `127.0.0.1:31337` by default (override with `OPENDOTA_SIDECAR_PORT` or
+            `-Dopendota.sidecar.port`), and the durable L2 cache is off unless you set
+            `OPENDOTA_SIDECAR_L2=true`. Then point each MCP server at it by enabling forwarding
+            (`opendota.sidecar-enabled=true`) and run the server with `java -jar opendota-mcp-1.0.0.jar`.
+            Verify downloads with the accompanying `.sha256` files (`sha256sum -c <file>.sha256`).

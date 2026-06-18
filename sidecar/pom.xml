@@ -33,11 +33,19 @@
 
     <dependencies>
         <!--
-          No runtime dependencies on purpose: the sidecar uses only the JDK
-          (com.sun.net.httpserver.HttpServer + java.net.http) and the plain-Java
-          OpenDota client classes copied into this module (kept byte-identical to the
-          root copies, enforced by ClientCopyDriftTest). Tests use JUnit 5 + AssertJ.
+          The sidecar's ONLY runtime dependency: the SQLite JDBC driver backing the
+          durable L2 cache tier (see docs/l2-cache-design.md). Runtime scope — the L2
+          code uses only java.sql interfaces. It must NEVER appear in the root pom
+          (locked-stack rule: sqlite-jdbc stays sidecar-only, no fat-jar). Everything
+          else is JDK-only (HttpServer + java.net.http) plus the byte-identical copied
+          OpenDota client classes (guarded by ClientCopyDriftTest). Tests: JUnit 5 + AssertJ.
         -->
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.47.2.0</version>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -65,7 +73,12 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.6</version>
             </plugin>
-            <!-- Build a runnable jar: java -jar target/opendota-sidecar-1.0.0.jar -->
+            <!--
+              Build a runnable PLAIN jar (not a fat jar): java -jar target/opendota-sidecar-1.0.0.jar.
+              sqlite-jdbc rides as an ordinary sibling jar in target/lib/ (copied by the
+              maven-dependency-plugin below); the manifest's Class-Path (addClasspath +
+              classpathPrefix=lib/) points the launcher at it. No shade/assembly.
+            -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
@@ -74,9 +87,33 @@
                     <archive>
                         <manifest>
                             <mainClass>com.raorbit.opendota.sidecar.SidecarMain</mainClass>
+                            <addClasspath>true</addClasspath>
+                            <classpathPrefix>lib/</classpathPrefix>
                         </manifest>
                     </archive>
                 </configuration>
+            </plugin>
+            <!--
+              Copy the runtime-scope dependencies (sqlite-jdbc) into target/lib/ during the
+              package phase, so the plain jar + sibling lib/ dir runs with `java -jar`.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-runtime-deps</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+                            <includeScope>runtime</includeScope>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

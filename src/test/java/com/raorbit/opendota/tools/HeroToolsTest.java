@@ -67,6 +67,46 @@ class HeroToolsTest {
     }
 
     @Test
+    void getBenchmarksBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("{}");
+        HeroTools tools = new HeroTools(client);
+
+        tools.getBenchmarks("14");
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/benchmarks?hero_id=14");
+    }
+
+    @Test
+    void getBenchmarksWithBlankReturnsBadArgWithoutCallingClient() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        HeroTools tools = new HeroTools(client);
+
+        String result = tools.getBenchmarks("  ");
+
+        assertThat(result)
+                .contains("\"isError\":true")
+                .contains("\"status\":400")
+                .contains("\"endpoint\":\"/benchmarks\"");
+        verify(client, never()).getJson(anyString());
+    }
+
+    @Test
+    void getDistributionsBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("{}");
+        HeroTools tools = new HeroTools(client);
+
+        tools.getDistributions();
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/distributions");
+    }
+
+    @Test
     void getHeroRankingsWithNullReturnsBadArgWithoutCallingClient() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         HeroTools tools = new HeroTools(client);

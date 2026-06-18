@@ -255,4 +255,73 @@ class SidecarHttpServerTest {
             assertThat(r.body()).contains("REDACTED").doesNotContain(apiKey);
         }
     }
+
+    @Test
+    void prefixPathsOutsideTheExactContextAre404() throws Exception {
+        // JDK HttpServer matches contexts by prefix; /stats and /health must reject longer paths
+        // (e.g. /statsZZZ, /healthz) rather than serve them from those handlers.
+        assertThat(get("/statsZZZ").statusCode()).isEqualTo(404);
+        assertThat(get("/healthz").statusCode()).isEqualTo(404);
+    }
+
+    @Test
+    void statsReportsCacheAndLimiterCounters() throws Exception {
+        stubUpstream("/api/players/123", 200, "{\"profile\":{\"account_id\":123}}");
+
+        // First call misses the L1 cache and fetches; the second is served from cache (a hit).
+        get("/api/players/123");
+        get("/api/players/123");
+
+        HttpResponse<String> stats = get("/stats");
+        assertThat(stats.statusCode()).isEqualTo(200);
+        assertThat(stats.body())
+                .contains("\"cacheHits\":")
+                .contains("\"cacheMisses\":")
+                .contains("\"cacheEntries\":")
+                .contains("\"availablePermits\":")
+                // keyless tier default budget, and at least one cache hit from the repeat call.
+                .contains("\"permitsPerMinute\":60")
+                .contains("\"cacheHits\":1");
+        // One upstream fetch despite two identical calls (cache hit on the second).
+        assertThat(upstreamHits.get()).isEqualTo(1);
+    }
+
+    @Test
+    void tokenGatedSidecarRequiresMatchingHeaderForApiButNotHealth() throws Exception {
+        stubUpstream("/api/heroes", 200, "[]");
+        try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "s3cret")) {
+            gated.start();
+            String b = "http://127.0.0.1:" + gated.port();
+
+            // No token header -> 401, and the request never reaches the upstream.
+            HttpResponse<String> missing = http.send(
+                    HttpRequest.newBuilder(URI.create(b + "/api/heroes")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(missing.statusCode()).isEqualTo(401);
+
+            // Wrong token -> 401.
+            HttpResponse<String> wrong = http.send(
+                    HttpRequest.newBuilder(URI.create(b + "/api/heroes"))
+                            .header("X-Sidecar-Token", "nope").GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(wrong.statusCode()).isEqualTo(401);
+
+            // Correct token -> 200 and the body is served.
+            HttpResponse<String> ok = http.send(
+                    HttpRequest.newBuilder(URI.create(b + "/api/heroes"))
+                            .header("X-Sidecar-Token", "s3cret").GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(ok.statusCode()).isEqualTo(200);
+            assertThat(ok.body()).isEqualTo("[]");
+
+            // /health stays open even when auth is enabled (no token needed).
+            HttpResponse<String> health = http.send(
+                    HttpRequest.newBuilder(URI.create(b + "/health")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(health.statusCode()).isEqualTo(200);
+
+            // Only the authorized /api call reached the upstream.
+            assertThat(upstreamHits.get()).isEqualTo(1);
+        }
+    }
 }

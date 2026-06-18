@@ -34,11 +34,45 @@ class PlayerToolsTest {
 
         // limit=10, offset=20, rest null, sort="kills" — exercises the lone String
         // filter through appendParam (which URL-encodes the value).
-        tools.getPlayerMatches(123L, 10, 20, null, null, null, null, null, "kills");
+        tools.getPlayerMatches(123L, 10, 20, null, null, null, null, null, "kills",
+                null, null, null, null, null, null, null);
 
         ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
         org.mockito.Mockito.verify(client).getJson(path.capture());
         assertThat(path.getValue()).isEqualTo("/players/123/matches?limit=10&offset=20&sort=kills");
+    }
+
+    @Test
+    void getPlayerMatchesExpandsProjectAndAppendsFilters() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        // hero_id=1, with_hero_id=2, against_hero_id=3, lane_role=2, is_radiant=1, and a
+        // comma-separated project list that must expand into one project=<field> per token.
+        tools.getPlayerMatches(123L, null, null, 1, null, null, null, null, null,
+                "kills,deaths,hero_id", 2, 3, null, 2, null, 1);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo(
+                "/players/123/matches?hero_id=1&with_hero_id=2&against_hero_id=3&lane_role=2&is_radiant=1"
+                        + "&project=kills&project=deaths&project=hero_id");
+    }
+
+    @Test
+    void getPlayerMatchesIgnoresBlankProjectTokens() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        // Empty/whitespace tokens in the project CSV are dropped, not emitted as project=.
+        tools.getPlayerMatches(9L, null, null, null, null, null, null, null, null,
+                " kills , , deaths ", null, null, null, null, null, null);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/players/9/matches?project=kills&project=deaths");
     }
 
     @Test
@@ -95,6 +129,32 @@ class PlayerToolsTest {
         ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
         org.mockito.Mockito.verify(client).getJson(path.capture());
         assertThat(path.getValue()).isEqualTo("/players/88/recentMatches");
+    }
+
+    @Test
+    void getPlayerPeersBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        tools.getPlayerPeers(42L);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/players/42/peers");
+    }
+
+    @Test
+    void getPlayerTotalsBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        tools.getPlayerTotals(42L);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/players/42/totals");
     }
 
     @Test

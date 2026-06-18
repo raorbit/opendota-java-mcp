@@ -244,6 +244,8 @@ class OpenDotaClientTest {
         assertThat(client.ttlFor("/heroes")).isEqualTo(Duration.ofHours(6));
         assertThat(client.ttlFor("/constants/items")).isEqualTo(Duration.ofHours(6));
         assertThat(client.ttlFor("/heroStats")).isEqualTo(Duration.ofHours(1));
+        assertThat(client.ttlFor("/benchmarks?hero_id=1")).isEqualTo(Duration.ofHours(1));
+        assertThat(client.ttlFor("/distributions")).isEqualTo(Duration.ofHours(6));
         assertThat(client.ttlFor("/players/123")).isEqualTo(Duration.ofSeconds(30));
         // Query string is stripped before prefix matching.
         assertThat(client.ttlFor("/players/123/wl?limit=5")).isEqualTo(Duration.ofSeconds(30));

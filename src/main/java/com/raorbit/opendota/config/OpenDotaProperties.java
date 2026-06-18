@@ -53,6 +53,13 @@ public class OpenDotaProperties {
     /** Port of the shared sidecar (used only when {@link #sidecarEnabled}). */
     private int sidecarPort = 31337;
 
+    /**
+     * Optional shared secret sent to the sidecar (header {@code X-Sidecar-Token}) when the
+     * sidecar is started with a matching token. Leave blank/unset (the default) when the
+     * sidecar runs without auth. Used only when {@link #sidecarEnabled}.
+     */
+    private String sidecarToken;
+
     public int getCacheMaxEntries() {
         return cacheMaxEntries;
     }
@@ -115,5 +122,13 @@ public class OpenDotaProperties {
 
     public void setSidecarPort(int sidecarPort) {
         this.sidecarPort = sidecarPort;
+    }
+
+    public String getSidecarToken() {
+        return sidecarToken;
+    }
+
+    public void setSidecarToken(String sidecarToken) {
+        this.sidecarToken = sidecarToken;
     }
 }

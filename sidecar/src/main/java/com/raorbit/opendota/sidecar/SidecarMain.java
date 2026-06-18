@@ -4,6 +4,7 @@ import com.raorbit.opendota.client.OpenDotaClient;
 
 import java.io.IOException;
 import java.net.BindException;
+import java.sql.SQLException;
 import java.util.concurrent.CountDownLatch;
 import java.util.logging.Logger;
 
@@ -40,16 +41,29 @@ public final class SidecarMain {
                     + "jointly shares OpenDota's 60 requests/minute keyless limit. Set the key on "
                     + "this process to share the 300/minute keyed budget instead.");
         }
+        // Optional durable L2 tier (off by default). When enabled, wrap the client in the gateway;
+        // if the SQLite store cannot open, log and fall back to the bare client rather than failing
+        // start-up — L2 is a best-effort accelerator, never a hard dependency.
+        L2CachingGateway gateway = maybeBuildGateway(client);
+
         SidecarHttpServer server;
         try {
-            server = new SidecarHttpServer(port, client);
+            server = new SidecarHttpServer(port, client, gateway, resolveToken());
         } catch (BindException e) {
             // Most likely a sidecar is already running on this port (the design is one shared
             // process per machine). Fail fast with an actionable message, not a raw stack trace.
-            client.close();
+            closeQuietly(gateway, client);
             LOG.severe("cannot bind 127.0.0.1:" + port + " (" + e.getMessage() + ") — is a sidecar "
                     + "already running, or the port already in use? Stop the other process or pick "
                     + "another port via OPENDOTA_SIDECAR_PORT / -Dopendota.sidecar.port.");
+            System.exit(1);
+            return;   // unreachable after exit; keeps 'server' definitely assigned for the compiler
+        } catch (IOException e) {
+            // Any other failure to create the server: still close the gateway (and its SQLite
+            // store) / client rather than escaping main() and leaking them on the way out.
+            closeQuietly(gateway, client);
+            LOG.severe("cannot start HTTP server on 127.0.0.1:" + port + " ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage() + ").");
             System.exit(1);
             return;   // unreachable after exit; keeps 'server' definitely assigned for the compiler
         }
@@ -58,6 +72,36 @@ public final class SidecarMain {
         // Park the main thread so the process stays up as a long-lived service until
         // the JVM is signalled to stop (the shutdown hook then closes the server).
         new CountDownLatch(1).await();
+    }
+
+    /** Close the gateway (which closes the wrapped client) if present, else just the client. */
+    private static void closeQuietly(L2CachingGateway gateway, OpenDotaClient client) {
+        if (gateway != null) {
+            gateway.close();
+        } else {
+            client.close();
+        }
+    }
+
+    /**
+     * Build the durable L2 gateway when the feature flag is on, else {@code null} (so the sidecar
+     * opens no SQLite file and behaves exactly as today). A failure to open the store is logged and
+     * degrades to the bare client — the cache is an accelerator, not a dependency.
+     */
+    static L2CachingGateway maybeBuildGateway(OpenDotaClient client) {
+        if (!L2Config.isEnabled()) {
+            return null;
+        }
+        L2Config config = L2Config.fromEnvironment();
+        try {
+            L2Store store = new L2Store(config.dbPath(), L2Store.SCHEMA_VERSION);
+            LOG.info(() -> "L2 durable cache enabled at " + config.dbPath());
+            return new L2CachingGateway(client, store, config);
+        } catch (SQLException e) {
+            LOG.warning(() -> "L2 durable cache could not open " + config.dbPath() + " ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage() + "); running without L2.");
+            return null;
+        }
     }
 
     /**
@@ -86,5 +130,15 @@ public final class SidecarMain {
             return DEFAULT_PORT;
         }
         return port;
+    }
+
+    /**
+     * Resolve the optional shared-secret token that gates {@code /api/*}: system property
+     * {@code opendota.sidecar.token} (or the dashed {@code opendota.sidecar-token}), else env
+     * {@code OPENDOTA_SIDECAR_TOKEN}, else {@code null} (auth disabled — any local caller accepted).
+     */
+    static String resolveToken() {
+        return System.getProperty("opendota.sidecar.token",
+                System.getProperty("opendota.sidecar-token", System.getenv("OPENDOTA_SIDECAR_TOKEN")));
     }
 }

@@ -60,3 +60,6 @@ logs/
 
 # Working plans
 plans/
+
+# Sidecar runtime (pid/log from scripts/sidecar.*)
+sidecar/.run/

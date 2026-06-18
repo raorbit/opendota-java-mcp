@@ -20,7 +20,8 @@ public class McpToolConfig {
             // Forward every call to the shared local sidecar, which holds the API key
             // and owns the single rate limiter and cache. This server keeps no key.
             String baseUrl = "http://" + properties.getSidecarHost() + ":" + properties.getSidecarPort() + "/api";
-            return OpenDotaClient.forwardingTo(baseUrl, properties.getMaxResponseBytes());
+            return OpenDotaClient.forwardingTo(baseUrl, properties.getMaxResponseBytes(),
+                    properties.getSidecarToken());
         }
         return new OpenDotaClient(System.getenv("OPENDOTA_API_KEY"),
                 properties.getCacheMaxEntries(), properties.getCacheMaxBytes(),
