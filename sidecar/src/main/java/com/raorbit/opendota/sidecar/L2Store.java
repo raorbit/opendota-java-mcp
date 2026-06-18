@@ -9,6 +9,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The durable, SQLite-backed L2 store (see {@code docs/l2-cache-design.md} §6, §7).
@@ -35,6 +36,12 @@ public final class L2Store implements AutoCloseable {
 
     private final Connection conn;
 
+    // O(1) running totals so enforceCaps() avoids full-table COUNT/SUM scans on the request path
+    // (spec §6.4). Seeded once on open, then maintained by put/evictOldest/patchBust under the
+    // connection monitor. The byte total mirrors SQLite's char-based LENGTH(); approximate by design.
+    private final AtomicLong currentRows = new AtomicLong();
+    private final AtomicLong currentBytes = new AtomicLong();
+
     /**
      * Open (creating if necessary) a store at {@code dbPath} using the given schema version. The
      * parent directory is created if missing.
@@ -48,6 +55,7 @@ public final class L2Store implements AutoCloseable {
         try {
             applyPragmas();
             migrate(schemaVersion);
+            initCounters();
         } catch (SQLException e) {
             closeQuietly();
             throw e;
@@ -139,6 +147,18 @@ public final class L2Store implements AutoCloseable {
         }
     }
 
+    /** Seed the running row/byte totals from the table once, after migration. */
+    private void initCounters() throws SQLException {
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries")) {
+            if (rs.next()) {
+                currentRows.set(rs.getLong(1));
+                currentBytes.set(rs.getLong(2));
+            }
+        }
+    }
+
     /**
      * A row read from {@code cache_entries}. The gateway applies the read-time predicates
      * (TTL expiry, per-row stale {@code patch_id}, stale {@code schema_version}).
@@ -174,6 +194,20 @@ public final class L2Store implements AutoCloseable {
     /** Store (or overwrite) a row with {@code INSERT OR REPLACE} on the {@code path} primary key. */
     public synchronized void put(String path, String body, Classification classification, long storedAt,
                                  Long expiresAt, int schemaVersion, String patchId) throws SQLException {
+        // INSERT OR REPLACE may overwrite an existing row, so net out the old body's bytes (and skip
+        // the row increment) to keep the running totals exact across overwrites.
+        long oldBytes = 0L;
+        boolean existed = false;
+        try (PreparedStatement sel = conn.prepareStatement(
+                "SELECT LENGTH(body) FROM cache_entries WHERE path = ?")) {
+            sel.setString(1, path);
+            try (ResultSet rs = sel.executeQuery()) {
+                if (rs.next()) {
+                    existed = true;
+                    oldBytes = rs.getLong(1);
+                }
+            }
+        }
         String sql = "INSERT OR REPLACE INTO cache_entries"
                 + "(path, body, classification, stored_at, expires_at, schema_version, patch_id) "
                 + "VALUES (?, ?, ?, ?, ?, ?, ?)";
@@ -195,24 +229,24 @@ public final class L2Store implements AutoCloseable {
             }
             ps.executeUpdate();
         }
+        if (!existed) {
+            currentRows.incrementAndGet();
+        }
+        currentBytes.addAndGet((long) body.length() - oldBytes);
     }
 
-    /** Current number of rows in {@code cache_entries}. */
-    public synchronized long rowCount() throws SQLException {
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM cache_entries")) {
-            return rs.next() ? rs.getLong(1) : 0L;
-        }
+    /** Current number of rows in {@code cache_entries} (O(1) running total, maintained on writes). */
+    public long rowCount() {
+        return currentRows.get();
     }
 
-    /** Approximate total body bytes across all rows (UTF-8 length). */
-    public synchronized long totalBodyBytes() throws SQLException {
-        // length() counts UTF-16 chars in SQLite; for cap purposes an approximation is fine
-        // (spec §6.4 calls the byte cap "approximate"). It bounds growth without exactness.
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries")) {
-            return rs.next() ? rs.getLong(1) : 0L;
-        }
+    /**
+     * Approximate total body bytes across all rows (O(1) running total). Mirrors SQLite's char-based
+     * {@code LENGTH()}; for cap purposes an approximation is fine (spec §6.4 calls the byte cap
+     * "approximate") — it bounds growth without exactness.
+     */
+    public long totalBodyBytes() {
+        return currentBytes.get();
     }
 
     /**
@@ -225,12 +259,29 @@ public final class L2Store implements AutoCloseable {
         if (n <= 0) {
             return 0;
         }
+        // Sum the bytes of the soon-to-be-deleted oldest rows (bounded by n via the stored_at index)
+        // so the running byte total stays accurate after the delete.
+        long freedBytes = 0L;
+        String sumSql = "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries WHERE path IN "
+                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)";
+        try (PreparedStatement ps = conn.prepareStatement(sumSql)) {
+            ps.setInt(1, n);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    freedBytes = rs.getLong(1);
+                }
+            }
+        }
         String sql = "DELETE FROM cache_entries WHERE path IN "
                 + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)";
+        int deleted;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, n);
-            return ps.executeUpdate();
+            deleted = ps.executeUpdate();
         }
+        currentRows.addAndGet(-deleted);
+        currentBytes.addAndGet(-freedBytes);
+        return deleted;
     }
 
     /**
@@ -240,10 +291,22 @@ public final class L2Store implements AutoCloseable {
      * @return the number of rows deleted
      */
     public synchronized int patchBust() throws SQLException {
-        try (Statement st = conn.createStatement()) {
-            return st.executeUpdate("DELETE FROM cache_entries "
-                    + "WHERE classification = 'PERMANENT' AND patch_id IS NOT NULL");
+        String where = "WHERE classification = 'PERMANENT' AND patch_id IS NOT NULL";
+        long freedBytes = 0L;
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries " + where)) {
+            if (rs.next()) {
+                freedBytes = rs.getLong(1);
+            }
         }
+        int deleted;
+        try (Statement st = conn.createStatement()) {
+            deleted = st.executeUpdate("DELETE FROM cache_entries " + where);
+        }
+        currentRows.addAndGet(-deleted);
+        currentBytes.addAndGet(-freedBytes);
+        return deleted;
     }
 
     /** Read a {@code meta} value, or {@code null} if absent. */
