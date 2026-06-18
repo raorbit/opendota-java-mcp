@@ -95,7 +95,10 @@ public class PlayerTools {
     }
 
     @Tool(name = "get_player_matches",
-            description = "Match history for a Steam32 account_id, with optional filters/paging.")
+            description = "Match history for a Steam32 account_id, with optional filters/paging. "
+                    + "Pass 'project' as a comma-separated list of OpenDota match fields (e.g. "
+                    + "\"kills,deaths,assists,hero_id\") to trim each returned match to only those fields "
+                    + "and sharply cut response size.")
     public String getPlayerMatches(long account_id,
                                    @ToolParam(required = false) Integer limit,
                                    @ToolParam(required = false) Integer offset,
@@ -104,7 +107,14 @@ public class PlayerTools {
                                    @ToolParam(required = false) Integer game_mode,
                                    @ToolParam(required = false) Integer lobby_type,
                                    @ToolParam(required = false) Integer date,
-                                   @ToolParam(required = false) String sort) {
+                                   @ToolParam(required = false) String sort,
+                                   @ToolParam(required = false) String project,
+                                   @ToolParam(required = false) Integer with_hero_id,
+                                   @ToolParam(required = false) Integer against_hero_id,
+                                   @ToolParam(required = false) Integer included_account_id,
+                                   @ToolParam(required = false) Integer lane_role,
+                                   @ToolParam(required = false) Integer patch,
+                                   @ToolParam(required = false) Integer is_radiant) {
         StringBuilder sb = new StringBuilder("/players/").append(account_id).append("/matches");
         boolean[] started = {false};
         appendParam(sb, started, "limit", limit);
@@ -115,6 +125,15 @@ public class PlayerTools {
         appendParam(sb, started, "lobby_type", lobby_type);
         appendParam(sb, started, "date", date);
         appendParam(sb, started, "sort", sort);
+        appendParam(sb, started, "with_hero_id", with_hero_id);
+        appendParam(sb, started, "against_hero_id", against_hero_id);
+        appendParam(sb, started, "included_account_id", included_account_id);
+        appendParam(sb, started, "lane_role", lane_role);
+        appendParam(sb, started, "patch", patch);
+        appendParam(sb, started, "is_radiant", is_radiant);
+        // OpenDota's `project` is a repeatable query key; expand the comma-separated list
+        // into one project=<field> per token so the upstream trims to exactly those fields.
+        appendRepeated(sb, started, "project", project);
         String path = sb.toString();
         try {
             return client.getJson(path);
@@ -156,5 +175,22 @@ public class PlayerTools {
         sb.append(started[0] ? '&' : '?');
         started[0] = true;
         sb.append(name).append('=').append(OpenDotaClient.encode(String.valueOf(value)));
+    }
+
+    /**
+     * Append a repeatable query parameter once per non-blank comma-separated token in
+     * {@code csv} (e.g. {@code "kills,deaths"} → {@code project=kills&project=deaths}),
+     * which is how OpenDota expects array-valued query params. A {@code null} csv is skipped.
+     */
+    private static void appendRepeated(StringBuilder sb, boolean[] started, String name, String csv) {
+        if (csv == null) {
+            return;
+        }
+        for (String token : csv.split(",")) {
+            String t = token.trim();
+            if (!t.isEmpty()) {
+                appendParam(sb, started, name, t);
+            }
+        }
     }
 }
