@@ -8,7 +8,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -41,6 +43,7 @@ class SidecarHttpServerTest {
     private SidecarHttpServer sidecar;
     private HttpClient http;
     private String sidecarBase;
+    private String upstreamBase;
     private final AtomicInteger upstreamHits = new AtomicInteger();
     /** Request targets (path + raw query) the fake upstream received, in order. */
     private final List<String> upstreamReceived = new CopyOnWriteArrayList<>();
@@ -50,7 +53,7 @@ class SidecarHttpServerTest {
         upstream = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         upstream.setExecutor(Executors.newCachedThreadPool());
         upstream.start();
-        String upstreamBase = "http://localhost:" + upstream.getAddress().getPort() + "/api";
+        upstreamBase = "http://localhost:" + upstream.getAddress().getPort() + "/api";
 
         // The sidecar's single shared client, pointed at the fake upstream.
         OpenDotaClient client = new OpenDotaClient(null, upstreamBase);
@@ -62,6 +65,9 @@ class SidecarHttpServerTest {
 
     @AfterEach
     void tearDown() {
+        if (http != null) {
+            http.close();
+        }
         if (sidecar != null) {
             sidecar.close();
         }
@@ -179,5 +185,74 @@ class SidecarHttpServerTest {
         pool.shutdownNow();
 
         assertThat(upstreamHits.get()).isEqualTo(1);
+    }
+
+    @Test
+    void nonGetMethodIsRejectedWith405() throws Exception {
+        stubUpstream("/api/heroes", 200, "[]");
+
+        HttpResponse<String> health = http.send(
+                HttpRequest.newBuilder(URI.create(sidecarBase + "/health"))
+                        .POST(HttpRequest.BodyPublishers.noBody()).build(),
+                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> api = http.send(
+                HttpRequest.newBuilder(URI.create(sidecarBase + "/api/heroes"))
+                        .POST(HttpRequest.BodyPublishers.noBody()).build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(health.statusCode()).isEqualTo(405);
+        assertThat(api.statusCode()).isEqualTo(405);
+        // The verb is rejected before reaching the shared client / upstream.
+        assertThat(upstreamHits.get()).isEqualTo(0);
+    }
+
+    @Test
+    void upstreamTransportFailureBecomes502() throws Exception {
+        // The wrapped client cannot reach its upstream (a closed port) -> OpenDotaException
+        // with statusCode 0 -> the sidecar maps that transport failure to HTTP 502.
+        int deadPort;
+        try (ServerSocket s = new ServerSocket(0, 0, InetAddress.getLoopbackAddress())) {
+            deadPort = s.getLocalPort();
+        }   // released here — nothing listens on deadPort
+        OpenDotaClient deadClient = new OpenDotaClient(null, "http://127.0.0.1:" + deadPort + "/api");
+
+        try (SidecarHttpServer dead = new SidecarHttpServer(0, deadClient)) {
+            dead.start();
+            HttpResponse<String> r = http.send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + dead.port() + "/api/heroes")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(r.statusCode()).isEqualTo(502);
+        }
+    }
+
+    @Test
+    void apiKeyIsRedactedInMirroredErrorBodyEndToEnd() throws Exception {
+        // The highest-stakes path: a keyed sidecar + a hostile upstream that echoes the
+        // api_key in its error body. The mirrored body that crosses the loopback hop to the
+        // agent must be redacted, never the raw secret.
+        String apiKey = "00000000-1111-2222-3333-444444444444";
+        upstream.createContext("/api/players/777", exchange -> {
+            upstreamHits.incrementAndGet();
+            String target = exchange.getRequestURI().getRawPath();
+            String query = exchange.getRequestURI().getRawQuery();   // carries ?api_key=<key>
+            String echoed = "{\"error\":\"denied " + (query == null ? target : target + "?" + query) + "\"}";
+            byte[] bytes = echoed.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(500, bytes.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+
+        OpenDotaClient keyedClient = new OpenDotaClient(apiKey, upstreamBase);
+        try (SidecarHttpServer keyed = new SidecarHttpServer(0, keyedClient)) {
+            keyed.start();
+            HttpResponse<String> r = http.send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + keyed.port() + "/api/players/777"))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            assertThat(r.statusCode()).isEqualTo(500);
+            assertThat(r.body()).contains("REDACTED").doesNotContain(apiKey);
+        }
     }
 }
