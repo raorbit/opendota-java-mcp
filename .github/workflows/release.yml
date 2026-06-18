@@ -1,0 +1,65 @@
+name: release
+
+# Cut a release when a version tag is pushed, e.g. `git tag v1.0.0 && git push origin v1.0.0`.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create the GitHub Release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # Two independent Maven builds (no reactor). The sidecar must be built from the
+      # repo root so ClientCopyDriftTest can resolve the parent dir and compare the
+      # byte-copied client files against the root copies.
+      - name: Build and test the MCP server
+        run: mvn -B clean verify
+
+      - name: Build and test the sidecar
+        run: mvn -B -f sidecar/pom.xml clean verify
+
+      # Compute checksums next to each jar so they can be verified after download.
+      - name: Compute SHA-256 checksums
+        run: |
+          sha256sum target/opendota-mcp-1.0.0.jar > target/opendota-mcp-1.0.0.jar.sha256
+          sha256sum sidecar/target/opendota-sidecar-1.0.0.jar > sidecar/target/opendota-sidecar-1.0.0.jar.sha256
+          cat target/opendota-mcp-1.0.0.jar.sha256
+          cat sidecar/target/opendota-sidecar-1.0.0.jar.sha256
+
+      - name: Create GitHub Release and upload jars
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/opendota-mcp-1.0.0.jar
+            target/opendota-mcp-1.0.0.jar.sha256
+            sidecar/target/opendota-sidecar-1.0.0.jar
+            sidecar/target/opendota-sidecar-1.0.0.jar.sha256
+          body: |
+            This release ships two jars that are meant to run together and must stay
+            version-aligned: `opendota-mcp-1.0.0.jar` is the MCP stdio server that an MCP
+            client launches, and `opendota-sidecar-1.0.0.jar` is the shared localhost
+            sidecar that owns the single OpenDota rate limiter and cache for one or more
+            co-running MCP server processes. The MCP server only talks to a sidecar from
+            the same release, so always download and deploy both from the same tag rather
+            than mixing versions. Start the sidecar once per machine before launching the
+            MCP servers (set the API key here, not on the agents), e.g.
+            `OPENDOTA_API_KEY=<uuid> java -jar opendota-sidecar-1.0.0.jar`; it binds
+            `127.0.0.1:31337` by default (override with `OPENDOTA_SIDECAR_PORT` or
+            `-Dopendota.sidecar.port`). Then point each MCP server at it by enabling
+            forwarding (`opendota.sidecar-enabled=true`) and run the server with
+            `java -jar opendota-mcp-1.0.0.jar`. Verify downloads with the accompanying
+            `.sha256` files (`sha256sum -c <file>.sha256`).
