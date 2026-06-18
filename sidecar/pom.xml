@@ -25,6 +25,8 @@
     </licenses>
 
     <properties>
+        <!-- Keep maven.compiler.release in sync with the root pom's <java.version> (21).
+             This is a standalone build with no parent, so the two are not otherwise linked. -->
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
@@ -33,7 +35,8 @@
         <!--
           No runtime dependencies on purpose: the sidecar uses only the JDK
           (com.sun.net.httpserver.HttpServer + java.net.http) and the plain-Java
-          OpenDota client classes copied into this module. Tests use JUnit 5 + AssertJ.
+          OpenDota client classes copied into this module (kept byte-identical to the
+          root copies, enforced by ClientCopyDriftTest). Tests use JUnit 5 + AssertJ.
         -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
