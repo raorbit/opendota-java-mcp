@@ -55,6 +55,9 @@ function Stop-Sidecar {
   if (-not $proc) { Write-Host 'sidecar not running'; Remove-Item $PidFile -ErrorAction SilentlyContinue; return }
   Write-Host "stopping sidecar (pid $($proc.Id))"
   Stop-Process -Id $proc.Id -Force
+  # Wait for the process to actually exit (and release the port) before returning, so a following
+  # `restart` start doesn't lose the bind race and silently die on BindException.
+  try { Wait-Process -Id $proc.Id -Timeout 5 -ErrorAction Stop } catch {}
   Remove-Item $PidFile -ErrorAction SilentlyContinue
 }
 

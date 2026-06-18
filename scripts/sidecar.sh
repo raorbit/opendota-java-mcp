@@ -42,6 +42,17 @@ stop() {
   local pid; pid="$(cat "$PID_FILE")"
   echo "stopping sidecar (pid $pid)"
   kill "$pid" 2>/dev/null || true
+  # Wait for the JVM to actually exit (and release the port) before returning, so a following
+  # `restart` start() doesn't lose the bind race and silently die on BindException. SIGKILL as
+  # a last resort after ~5s.
+  for _ in $(seq 1 50); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "sidecar (pid $pid) did not exit in time, sending SIGKILL"
+    kill -9 "$pid" 2>/dev/null || true
+  fi
   rm -f "$PID_FILE"
 }
 
