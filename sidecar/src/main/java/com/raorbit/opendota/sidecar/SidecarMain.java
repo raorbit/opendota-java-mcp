@@ -94,7 +94,7 @@ public final class SidecarMain {
         }
         L2Config config = L2Config.fromEnvironment();
         try {
-            L2Store store = new L2Store(config.dbPath(), L2Store.SCHEMA_VERSION);
+            L2Store store = new L2Store(config.dbPath(), L2Store.SCHEMA_VERSION, config.readPoolSize());
             LOG.info(() -> "L2 durable cache enabled at " + config.dbPath());
             return new L2CachingGateway(client, store, config);
         } catch (SQLException e) {
