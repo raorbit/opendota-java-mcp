@@ -47,7 +47,23 @@ function Start-Sidecar {
     -RedirectStandardOutput $LogFile -RedirectStandardError "$LogFile.err" `
     -NoNewWindow -PassThru
   $proc.Id | Out-File -Encoding ascii $PidFile
-  Write-Host "started (pid $($proc.Id))"
+  # Verify it actually came up rather than reporting a stale 'started' for a JVM that died at once
+  # (e.g. BindException because the port is taken). Poll /health for ~5s; bail if the process exits.
+  for ($i = 0; $i -lt 25; $i++) {
+    if ($proc.HasExited) {
+      Write-Host "sidecar exited during startup (exit $($proc.ExitCode)) - see $LogFile"
+      Remove-Item $PidFile -ErrorAction SilentlyContinue
+      return
+    }
+    try {
+      Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 1 | Out-Null
+      Write-Host "started (pid $($proc.Id)); /health ok on 127.0.0.1:$Port"
+      return
+    } catch {
+      Start-Sleep -Milliseconds 200
+    }
+  }
+  Write-Host "started (pid $($proc.Id)) but /health did not answer within 5s - check $LogFile"
 }
 
 function Stop-Sidecar {

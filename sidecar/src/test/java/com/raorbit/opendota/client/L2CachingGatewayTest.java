@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -329,8 +330,12 @@ class L2CachingGatewayTest {
         upstream.setExecutor(Executors.newCachedThreadPool());
         AtomicInteger upstreamHits = new AtomicInteger();
         CountDownLatch release = new CountDownLatch(1);
+        // Tripped when the single-flight leader actually reaches upstream, so the main thread can
+        // release deterministically (instead of sleeping) the instant the one upstream call is parked.
+        CountDownLatch leaderInUpstream = new CountDownLatch(1);
         upstream.createContext("/api/matches/111", ex -> {
             upstreamHits.incrementAndGet();
+            leaderInUpstream.countDown();
             try {
                 release.await(2, TimeUnit.SECONDS);
             } catch (InterruptedException ie) {
@@ -350,16 +355,22 @@ class L2CachingGatewayTest {
              L2CachingGateway gw = new L2CachingGateway(realClient, store, config(db))) {
             int n = 8;
             ExecutorService pool = Executors.newFixedThreadPool(n);
-            CountDownLatch start = new CountDownLatch(1);
+            // Line the callers up with a barrier (n callers + this thread) instead of a sleep: the
+            // barrier trips only once every caller thread is actually scheduled and parked on it, so
+            // they all enter gw.get() together regardless of how slowly the pool spins up.
+            CyclicBarrier start = new CyclicBarrier(n + 1);
             List<Future<String>> futures = new ArrayList<>();
             for (int i = 0; i < n; i++) {
                 futures.add(pool.submit(() -> {
-                    start.await();
+                    start.await(5, TimeUnit.SECONDS);
                     return gw.get("/matches/111");
                 }));
             }
-            start.countDown();
-            Thread.sleep(250);   // let all callers reach the client's in-flight wait
+            start.await(5, TimeUnit.SECONDS);   // release all n callers simultaneously
+            // Release the upstream only once the single-flight leader has provably reached it (and is
+            // therefore registered in the client's inFlight map). Until then no follower can win the
+            // leader slot, so this guarantees exactly one upstream call without an arbitrary sleep.
+            assertThat(leaderInUpstream.await(5, TimeUnit.SECONDS)).isTrue();
             release.countDown();
             for (Future<String> f : futures) {
                 assertThat(f.get(5, TimeUnit.SECONDS)).isEqualTo(PARSED_MATCH);
@@ -369,6 +380,14 @@ class L2CachingGatewayTest {
             // Exactly one upstream call despite N concurrent L2 misses, and a single stored row.
             assertThat(upstreamHits.get()).isEqualTo(1);
             assertThat(store.rowCount()).isEqualTo(1);
+            // The concurrent misses also collapse to ~one L2 write (not one per caller): the in-flight
+            // store-dedup (the gateway's `storing` set) collapses only TRULY concurrent stores. After the
+            // shared upstream call completes, the leader may finish its store and clear `storing` before a
+            // straggling follower returns and stores again, so 1 or 2 writes can land — a benign race, not
+            // flakiness. <=2 is therefore the strongest bound that holds deterministically; do not tighten
+            // it to ==1 (that would reintroduce timing dependence), but it is still far below the n callers
+            // an undeduped path would produce.
+            assertThat(gw.stats().l2Store()).isLessThanOrEqualTo(2);
         } finally {
             upstream.stop(0);
         }

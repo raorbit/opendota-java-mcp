@@ -34,6 +34,10 @@ public final class L2Config {
     private static final String MAX_BYTES_PROP = "opendota.sidecar.l2.maxBytes";
     private static final String MAX_BYTES_ENV = "OPENDOTA_SIDECAR_L2_MAX_BYTES";
 
+    // --- read-connection pool ---
+    private static final String READ_POOL_PROP = "opendota.sidecar.l2.readPool";
+    private static final String READ_POOL_ENV = "OPENDOTA_SIDECAR_L2_READ_POOL";
+
     // --- patch-check cadence ---
     private static final String PATCH_INTERVAL_PROP = "opendota.sidecar.l2.patchCheckMillis";
     private static final String PATCH_INTERVAL_ENV = "OPENDOTA_SIDECAR_L2_PATCH_CHECK_MILLIS";
@@ -57,13 +61,20 @@ public final class L2Config {
     private final long maxBytes;
     private final long patchCheckMillis;
     private final String patchIdOverride;
+    private final int readPoolSize;
 
     public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride) {
+        this(dbPath, maxRows, maxBytes, patchCheckMillis, patchIdOverride, L2Store.DEFAULT_READ_POOL);
+    }
+
+    public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride,
+                    int readPoolSize) {
         this.dbPath = dbPath;
         this.maxRows = maxRows;
         this.maxBytes = maxBytes;
         this.patchCheckMillis = patchCheckMillis;
         this.patchIdOverride = patchIdOverride;
+        this.readPoolSize = readPoolSize;
     }
 
     /** Whether the L2 tier is enabled via {@code OPENDOTA_SIDECAR_L2=true} / {@code -Dopendota.sidecar.l2=true}. */
@@ -98,7 +109,8 @@ public final class L2Config {
                 resolveInt(MAX_ROWS_PROP, MAX_ROWS_ENV, DEFAULT_MAX_ROWS),
                 resolveLong(MAX_BYTES_PROP, MAX_BYTES_ENV, DEFAULT_MAX_BYTES),
                 resolveLong(PATCH_INTERVAL_PROP, PATCH_INTERVAL_ENV, DEFAULT_PATCH_CHECK_MILLIS),
-                trimToNull(resolve(PATCH_ID_PROP, PATCH_ID_ENV, null)));
+                trimToNull(resolve(PATCH_ID_PROP, PATCH_ID_ENV, null)),
+                resolveInt(READ_POOL_PROP, READ_POOL_ENV, L2Store.DEFAULT_READ_POOL));
     }
 
     public Path dbPath() {
@@ -120,6 +132,11 @@ public final class L2Config {
     /** The operator-supplied current patch id, or {@code null} to discover it from {@code /constants/patch}. */
     public String patchIdOverride() {
         return patchIdOverride;
+    }
+
+    /** Number of read-only connections in the L2 read pool (spec §7.1); {@link L2Store} clamps the value. */
+    public int readPoolSize() {
+        return readPoolSize;
     }
 
     private static Path resolveDbPath() {

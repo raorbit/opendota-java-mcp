@@ -1,6 +1,8 @@
 package com.raorbit.opendota.sidecar;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
@@ -9,8 +11,17 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link L2Store}: pragmas, the hand-rolled schema_version drop+rebuild migration
@@ -82,6 +93,28 @@ class L2StoreTest {
     }
 
     @Test
+    void byteTotalTracksUtf8BytesConsistentlyAndZeroesAfterEviction(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // A body with a 4-byte emoji and a 3-byte CJK char: UTF-8 bytes != UTF-16 length != chars,
+            // so a unit mismatch between put (Java) and evict (SQLite) would surface here.
+            String body = "{\"n\":\"😀漢\"}";
+            long expected = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            store.put("/matches/1", body, Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.totalBodyBytes()).isEqualTo(expected);
+
+            // Overwrite with a shorter ASCII body: the running total nets the delta exactly.
+            store.put("/matches/1", "{}", Classification.PERMANENT, 200, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.totalBodyBytes()).isEqualTo(2L);
+
+            // Eviction subtracts the same bytes it deleted (DELETE ... RETURNING), so the total is 0.
+            assertThat(store.evictOldest(1)).isEqualTo(1);
+            assertThat(store.totalBodyBytes()).isZero();
+            assertThat(store.rowCount()).isZero();
+        }
+    }
+
+    @Test
     void patchBustDeletesPatchScopedStaticButNotMatches(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
         try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
@@ -103,6 +136,161 @@ class L2StoreTest {
             assertThat(store.storedPatchId()).isNull();
             store.storePatchId("54");
             assertThat(store.storedPatchId()).isEqualTo("54");
+        }
+    }
+
+    @Test
+    void initCountersReseedsUtf8ByteTotalAcrossReopenForNonAscii(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // A body with a 4-byte emoji and a 3-byte CJK char: UTF-8 bytes != UTF-16 length != char count,
+        // so seeding from char length on reopen (rather than SUM(LENGTH(CAST(body AS BLOB)))) would diverge.
+        String body = "{\"n\":\"😀漢\"}";
+        long expected = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/matches/1", body, Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.totalBodyBytes()).isEqualTo(expected);
+        }
+        // Reopen over the same file: initCounters re-seeds the byte total in UTF-8 bytes, not char count.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            assertThat(store.totalBodyBytes()).isEqualTo(expected);
+            assertThat(store.rowCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void zeroRowEvictionAndPatchBustReturnZeroAndLeaveTotalsUnchanged(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // Empty table: evicting from nothing is a no-op and the totals stay zero.
+            assertThat(store.evictOldest(5)).isZero();
+            assertThat(store.totalBodyBytes()).isZero();
+            assertThat(store.rowCount()).isZero();
+
+            // A match row (patch_id = null) is not patch-scoped, so patchBust deletes nothing and it survives.
+            store.put("/matches/1", "{}", Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            long bytesBefore = store.totalBodyBytes();
+            long rowsBefore = store.rowCount();
+            assertThat(store.patchBust()).isZero();
+            assertThat(store.totalBodyBytes()).isEqualTo(bytesBefore);
+            assertThat(store.rowCount()).isEqualTo(rowsBefore);
+            assertThat(store.get("/matches/1")).as("a non-patch-scoped row survives a bust with no matches").isNotNull();
+        }
+    }
+
+    // ---- read-connection pool (spec §7.1) ----
+
+    @Test
+    void fileBackedStoreOpensTheConfiguredReadPoolClampedToBounds(@TempDir Path tmp) throws Exception {
+        try (L2Store store = new L2Store(tmp.resolve("n.db"), L2Store.SCHEMA_VERSION, 3)) {
+            assertThat(store.readPoolCapacity()).isEqualTo(3);
+        }
+        // Over-large requests are clamped to MAX_READ_POOL; non-positive clamps up to 1.
+        try (L2Store store = new L2Store(tmp.resolve("big.db"), L2Store.SCHEMA_VERSION, 9999)) {
+            assertThat(store.readPoolCapacity()).isEqualTo(L2Store.MAX_READ_POOL);
+        }
+        try (L2Store store = new L2Store(tmp.resolve("zero.db"), L2Store.SCHEMA_VERSION, 0)) {
+            assertThat(store.readPoolCapacity()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    @DisabledOnOs(value = OS.WINDOWS, disabledReason = "a ':memory:' path has an illegal colon on Windows")
+    void inMemoryStoreHasNoReadPoolAndRoundTrips() throws Exception {
+        // The in-memory branch shares the single connection (a 2nd :memory: connection is a separate
+        // empty db), so there is no read pool. Exercised on Linux CI; skipped on Windows (colon path).
+        try (L2Store store = new L2Store(Path.of(":memory:"), L2Store.SCHEMA_VERSION)) {
+            assertThat(store.readPoolCapacity()).isZero();
+            store.put("/heroes", "[1,2]", Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, "A");
+            assertThat(store.get("/heroes").body()).isEqualTo("[1,2]");
+            assertThat(store.evictOldest(1)).isEqualTo(1);
+            assertThat(store.get("/heroes")).isNull();
+        }
+    }
+
+    @Test
+    void writeOnWriteConnectionIsVisibleToAPooledReadConnection(@TempDir Path tmp) throws Exception {
+        // get() borrows a *separate* read connection, so this verifies WAL cross-connection visibility
+        // of a just-committed write on the same live store (not merely across a reopen).
+        try (L2Store store = new L2Store(tmp.resolve("l2.db"), L2Store.SCHEMA_VERSION, 4)) {
+            store.put("/heroes", "[1]", Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, "A");
+            assertThat(store.get("/heroes")).isNotNull();
+            assertThat(store.get("/heroes").body()).isEqualTo("[1]");
+        }
+    }
+
+    @Test
+    void readPoolGrantsNConcurrentLeasesThenBlocksUntilOneIsReturned(@TempDir Path tmp) throws Exception {
+        int n = 3;
+        try (L2Store store = new L2Store(tmp.resolve("l2.db"), L2Store.SCHEMA_VERSION, n)) {
+            List<Connection> held = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                Connection c = store.borrowReadForTest(1000);
+                assertThat(c).as("lease %d", i).isNotNull();
+                held.add(c);
+            }
+            // Pool exhausted: a further borrow times out fast and yields null — the best-effort miss path.
+            assertThat(store.borrowReadForTest(100)).isNull();
+            // Return one and a borrow succeeds again.
+            store.returnReadForTest(held.remove(0));
+            Connection again = store.borrowReadForTest(1000);
+            assertThat(again).isNotNull();
+            held.add(again);
+            held.forEach(store::returnReadForTest);
+        }
+    }
+
+    @Test
+    void readPoolConnectionsRejectWritesViaQueryOnlyPragma(@TempDir Path tmp) throws Exception {
+        try (L2Store store = new L2Store(tmp.resolve("l2.db"), L2Store.SCHEMA_VERSION, 2)) {
+            Connection c = store.borrowReadForTest(1000);
+            assertThat(c).isNotNull();
+            try (Statement st = c.createStatement()) {
+                // applyReadPragmas sets PRAGMA query_only = true, so a write on a read connection is rejected.
+                assertThatThrownBy(() -> st.executeUpdate("DELETE FROM cache_entries"))
+                        .isInstanceOf(SQLException.class);
+            } finally {
+                store.returnReadForTest(c);
+            }
+        }
+    }
+
+    @Test
+    void concurrentReadsDuringWritesAllSeeCommittedData(@TempDir Path tmp) throws Exception {
+        int readers = 8;
+        try (L2Store store = new L2Store(tmp.resolve("l2.db"), L2Store.SCHEMA_VERSION, readers)) {
+            store.put("/heroes", "[1]", Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, "A");
+            CyclicBarrier start = new CyclicBarrier(readers + 1);
+            AtomicInteger hits = new AtomicInteger();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            ExecutorService threads = Executors.newFixedThreadPool(readers);
+            try {
+                for (int i = 0; i < readers; i++) {
+                    threads.submit(() -> {
+                        try {
+                            start.await();
+                            for (int r = 0; r < 50; r++) {
+                                L2Store.Entry e = store.get("/heroes");
+                                if (e != null && "[1]".equals(e.body())) {
+                                    hits.incrementAndGet();
+                                }
+                            }
+                        } catch (Throwable t) {
+                            failure.compareAndSet(null, t);
+                        }
+                    });
+                }
+                start.await();   // release all readers together
+                // Hammer the write connection concurrently; the row always exists (overwrite, never delete).
+                for (int w = 0; w < 50; w++) {
+                    store.put("/heroes", "[1]", Classification.PERMANENT, 100 + w, null, L2Store.SCHEMA_VERSION, "A");
+                }
+            } finally {
+                threads.shutdown();
+                assertThat(threads.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            }
+            // Reads run in parallel against live writes with no error, every read sees the committed row.
+            assertThat(failure.get()).isNull();
+            assertThat(hits.get()).isEqualTo(readers * 50);
         }
     }
 }

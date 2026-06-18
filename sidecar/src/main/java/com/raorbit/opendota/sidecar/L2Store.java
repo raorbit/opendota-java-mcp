@@ -1,6 +1,7 @@
 package com.raorbit.opendota.sidecar;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -9,6 +10,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -19,9 +23,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * drop+rebuild migration keyed on {@code schema_version}, and exposes a small CRUD surface the
  * {@link L2CachingGateway} drives.
  *
- * <p>Concurrency: a single JDBC connection. Writes ({@link #put}, eviction, {@link #patchBust},
- * rebuild) are serialized on the connection monitor; reads share the same connection (SQLite
- * serializes internally) and WAL lets readers proceed under a concurrent writer (spec §7.1).
+ * <p>Concurrency (spec §7.1): writes ({@link #put}, eviction, {@link #patchBust}, rebuild) are
+ * serialized on this store's monitor over a single write connection. Reads ({@link #get}) instead
+ * borrow from a bounded pool of dedicated read-only connections, so concurrent L2-hit reads run in
+ * parallel (WAL allows many readers alongside the one writer) rather than serializing behind a lock.
+ * An in-memory db has no pool — a second {@code :memory:} connection would be a separate empty db —
+ * so it shares the write connection and reads there serialize with writes (correct for one db).
  *
  * <p>Errors are <em>not</em> swallowed here — they surface as {@link SQLException} so the gateway
  * can decide policy (count an {@code l2Error} and fall back to passthrough; spec §7.2).
@@ -31,14 +38,30 @@ public final class L2Store implements AutoCloseable {
     /** Bumped to force a destructive drop+rebuild of {@code cache_entries} (spec §6.3). */
     public static final int SCHEMA_VERSION = 1;
 
+    /** Default number of read-only connections when not configured (spec §7.1). */
+    static final int DEFAULT_READ_POOL = 4;
+    /** Upper bound on the pool so an over-large config value can't exhaust file handles. */
+    static final int MAX_READ_POOL = 64;
+    /** Max wait to borrow a read connection before degrading to a cache miss (best-effort, spec §7.2). */
+    private static final long BORROW_TIMEOUT_MILLIS = 5000L;
+
     private static final String META_SCHEMA_VERSION = "schema_version";
     private static final String META_PATCH_ID = "patch_id";
 
+    /** The single write connection; all writes are serialized on this store's monitor. */
     private final Connection conn;
+    /**
+     * Bounded pool of dedicated read-only connections for the hot {@link #get} path, so concurrent
+     * L2-hit reads run in parallel (WAL allows many readers + one writer). {@code null} for an
+     * in-memory db — a second {@code :memory:} connection is a separate empty db — in which case
+     * {@link #get} shares {@link #conn} under {@code this}.
+     */
+    private final BlockingQueue<Connection> readPool;
 
     // O(1) running totals so enforceCaps() avoids full-table COUNT/SUM scans on the request path
     // (spec §6.4). Seeded once on open, then maintained by put/evictOldest/patchBust under the
-    // connection monitor. The byte total mirrors SQLite's char-based LENGTH(); approximate by design.
+    // connection monitor. Bytes are real UTF-8 bytes on every axis — Java getBytes(UTF_8).length on
+    // insert, SQLite LENGTH(CAST(body AS BLOB)) on seed/evict — so the total can't drift on non-ASCII.
     private final AtomicLong currentRows = new AtomicLong();
     private final AtomicLong currentBytes = new AtomicLong();
 
@@ -50,14 +73,46 @@ public final class L2Store implements AutoCloseable {
      * @param schemaVersion the current schema version; a stored mismatch triggers a rebuild
      */
     public L2Store(Path dbPath, int schemaVersion) throws SQLException {
+        this(dbPath, schemaVersion, DEFAULT_READ_POOL);
+    }
+
+    /**
+     * As {@link #L2Store(Path, int)} but with an explicit read-connection pool size (clamped to
+     * {@code [1, }{@value #MAX_READ_POOL}{@code ]}). Ignored for an in-memory db, which shares the
+     * one connection.
+     */
+    public L2Store(Path dbPath, int schemaVersion, int readPoolSize) throws SQLException {
         String url = toJdbcUrl(dbPath);
+        boolean inMemory = ":memory:".equals(dbPath.toString());
+        int poolSize = Math.max(1, Math.min(MAX_READ_POOL, readPoolSize));
         this.conn = DriverManager.getConnection(url);
         try {
             applyPragmas();
             migrate(schemaVersion);
             initCounters();
+            // File-backed: a pool of read-only connections so L2-hit reads run in parallel under WAL.
+            // In-memory: no pool (a second :memory: connection is a separate empty db); get() shares conn.
+            this.readPool = inMemory ? null : openReadPool(url, poolSize);
         } catch (SQLException e) {
             closeQuietly();
+            throw e;
+        }
+    }
+
+    /** Open {@code size} read-only connections; on any failure, close the ones already opened and rethrow. */
+    private static BlockingQueue<Connection> openReadPool(String url, int size) throws SQLException {
+        BlockingQueue<Connection> pool = new ArrayBlockingQueue<>(size);
+        try {
+            for (int i = 0; i < size; i++) {
+                Connection c = DriverManager.getConnection(url);
+                applyReadPragmas(c);
+                pool.add(c);
+            }
+            return pool;
+        } catch (SQLException e) {
+            for (Connection c : pool) {
+                closeOne(c);
+            }
             throw e;
         }
     }
@@ -84,6 +139,14 @@ public final class L2Store implements AutoCloseable {
             st.execute("PRAGMA busy_timeout = 5000");
             st.execute("PRAGMA synchronous = NORMAL");
             st.execute("PRAGMA foreign_keys = ON");
+        }
+    }
+
+    /** Read connection: a busy_timeout for brief WAL contention and query_only as a defensive guard. */
+    private static void applyReadPragmas(Connection c) throws SQLException {
+        try (Statement st = c.createStatement()) {
+            st.execute("PRAGMA busy_timeout = 5000");
+            st.execute("PRAGMA query_only = true");
         }
     }
 
@@ -147,11 +210,16 @@ public final class L2Store implements AutoCloseable {
         }
     }
 
+    /** UTF-8 byte length of a body — matches SQLite {@code LENGTH(CAST(body AS BLOB))} and TtlCache. */
+    private static long utf8Len(String s) {
+        return s.getBytes(StandardCharsets.UTF_8).length;
+    }
+
     /** Seed the running row/byte totals from the table once, after migration. */
     private void initCounters() throws SQLException {
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
-                     "SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries")) {
+                     "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM cache_entries")) {
             if (rs.next()) {
                 currentRows.set(rs.getLong(1));
                 currentBytes.set(rs.getLong(2));
@@ -168,10 +236,39 @@ public final class L2Store implements AutoCloseable {
     }
 
     /** Read the row for {@code path}, or {@code null} if absent. Caller applies validity predicates. */
-    public synchronized Entry get(String path) throws SQLException {
+    public Entry get(String path) throws SQLException {
+        if (readPool == null) {
+            // In-memory: share the single connection, serialized with writes on this store's monitor.
+            synchronized (this) {
+                return queryOne(conn, path);
+            }
+        }
+        // File-backed: borrow a dedicated read connection so concurrent reads run in parallel (WAL lets
+        // each see the latest committed snapshot). Best-effort: if the pool is saturated past the borrow
+        // timeout — near-impossible for microsecond point lookups — degrade to a miss so the gateway
+        // fetches upstream rather than blocking the request indefinitely (spec §7.2).
+        Connection c;
+        try {
+            c = readPool.poll(BORROW_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        if (c == null) {
+            return null;
+        }
+        try {
+            return queryOne(c, path);
+        } finally {
+            readPool.add(c);   // capacity == pool size and we removed one, so this never blocks/fails
+        }
+    }
+
+    /** Run the single-row lookup on the given connection; {@code null} if absent. */
+    private static Entry queryOne(Connection c, String path) throws SQLException {
         String sql = "SELECT path, body, classification, stored_at, expires_at, schema_version, patch_id "
                 + "FROM cache_entries WHERE path = ?";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, path);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
@@ -191,6 +288,28 @@ public final class L2Store implements AutoCloseable {
         }
     }
 
+    // --- visible for testing: assert the read pool's capacity and borrow/return semantics ---
+
+    /** Total read-pool capacity (0 for an in-memory store, which has no pool). */
+    int readPoolCapacity() {
+        return readPool == null ? 0 : readPool.size() + readPool.remainingCapacity();
+    }
+
+    /** Borrow a read connection (waiting up to {@code timeoutMillis}); {@code null} if the pool is empty. */
+    Connection borrowReadForTest(long timeoutMillis) throws InterruptedException {
+        if (readPool == null) {
+            return conn;
+        }
+        return readPool.poll(timeoutMillis, TimeUnit.MILLISECONDS);
+    }
+
+    /** Return a connection borrowed via {@link #borrowReadForTest} to the pool. */
+    void returnReadForTest(Connection c) {
+        if (readPool != null && c != null && c != conn) {
+            readPool.add(c);
+        }
+    }
+
     /** Store (or overwrite) a row with {@code INSERT OR REPLACE} on the {@code path} primary key. */
     public synchronized void put(String path, String body, Classification classification, long storedAt,
                                  Long expiresAt, int schemaVersion, String patchId) throws SQLException {
@@ -199,7 +318,7 @@ public final class L2Store implements AutoCloseable {
         long oldBytes = 0L;
         boolean existed = false;
         try (PreparedStatement sel = conn.prepareStatement(
-                "SELECT LENGTH(body) FROM cache_entries WHERE path = ?")) {
+                "SELECT LENGTH(CAST(body AS BLOB)) FROM cache_entries WHERE path = ?")) {
             sel.setString(1, path);
             try (ResultSet rs = sel.executeQuery()) {
                 if (rs.next()) {
@@ -232,7 +351,7 @@ public final class L2Store implements AutoCloseable {
         if (!existed) {
             currentRows.incrementAndGet();
         }
-        currentBytes.addAndGet((long) body.length() - oldBytes);
+        currentBytes.addAndGet(utf8Len(body) - oldBytes);
     }
 
     /** Current number of rows in {@code cache_entries} (O(1) running total, maintained on writes). */
@@ -241,9 +360,10 @@ public final class L2Store implements AutoCloseable {
     }
 
     /**
-     * Approximate total body bytes across all rows (O(1) running total). Mirrors SQLite's char-based
-     * {@code LENGTH()}; for cap purposes an approximation is fine (spec §6.4 calls the byte cap
-     * "approximate") — it bounds growth without exactness.
+     * Total body bytes across all rows (O(1) running total). Counts real UTF-8 bytes on every axis —
+     * {@code getBytes(UTF_8).length} on insert, {@code LENGTH(CAST(body AS BLOB))} on seed/evict — so the
+     * total can't drift on non-ASCII bodies. (Spec §6.4 only requires an "approximate" byte cap; this is
+     * exact.)
      */
     public long totalBodyBytes() {
         return currentBytes.get();
@@ -259,25 +379,22 @@ public final class L2Store implements AutoCloseable {
         if (n <= 0) {
             return 0;
         }
-        // Sum the bytes of the soon-to-be-deleted oldest rows (bounded by n via the stored_at index)
-        // so the running byte total stays accurate after the delete.
-        long freedBytes = 0L;
-        String sumSql = "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries WHERE path IN "
-                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)";
-        try (PreparedStatement ps = conn.prepareStatement(sumSql)) {
-            ps.setInt(1, n);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    freedBytes = rs.getLong(1);
-                }
-            }
-        }
+        // Delete the n oldest rows AND sum their byte sizes in one statement via RETURNING, so the
+        // summed and deleted rows are guaranteed identical even when stored_at values tie (a separate
+        // SUM subquery could break the LIMIT tie differently from the DELETE and skew the byte total).
         String sql = "DELETE FROM cache_entries WHERE path IN "
-                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)";
-        int deleted;
+                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?) "
+                + "RETURNING LENGTH(CAST(body AS BLOB))";
+        int deleted = 0;
+        long freedBytes = 0L;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, n);
-            deleted = ps.executeUpdate();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    deleted++;
+                    freedBytes += rs.getLong(1);
+                }
+            }
         }
         currentRows.addAndGet(-deleted);
         currentBytes.addAndGet(-freedBytes);
@@ -315,18 +432,17 @@ public final class L2Store implements AutoCloseable {
      * @return the number of rows deleted
      */
     public synchronized int patchBust() throws SQLException {
-        String where = "WHERE classification = 'PERMANENT' AND patch_id IS NOT NULL";
+        // Single DELETE ... RETURNING so the deleted rows and their summed bytes are the same set.
+        String sql = "DELETE FROM cache_entries WHERE classification = 'PERMANENT' AND patch_id IS NOT NULL "
+                + "RETURNING LENGTH(CAST(body AS BLOB))";
+        int deleted = 0;
         long freedBytes = 0L;
         try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(
-                     "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM cache_entries " + where)) {
-            if (rs.next()) {
-                freedBytes = rs.getLong(1);
+             ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                deleted++;
+                freedBytes += rs.getLong(1);
             }
-        }
-        int deleted;
-        try (Statement st = conn.createStatement()) {
-            deleted = st.executeUpdate("DELETE FROM cache_entries " + where);
         }
         currentRows.addAndGet(-deleted);
         currentBytes.addAndGet(-freedBytes);
@@ -376,9 +492,20 @@ public final class L2Store implements AutoCloseable {
     }
 
     private void closeQuietly() {
+        // Drain and close every pooled read connection (none is the write conn — in-memory has no pool),
+        // then the write connection. Borrowed-but-unreturned connections only occur at JVM shutdown.
+        if (readPool != null) {
+            for (Connection c = readPool.poll(); c != null; c = readPool.poll()) {
+                closeOne(c);
+            }
+        }
+        closeOne(conn);
+    }
+
+    private static void closeOne(Connection c) {
         try {
-            if (conn != null && !conn.isClosed()) {
-                conn.close();
+            if (c != null && !c.isClosed()) {
+                c.close();
             }
         } catch (SQLException ignored) {
             // best-effort close

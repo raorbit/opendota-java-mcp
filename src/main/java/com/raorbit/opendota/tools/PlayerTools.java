@@ -122,9 +122,8 @@ public class PlayerTools {
 
     @Tool(name = "get_player_matches",
             description = "Match history for a Steam32 account_id, with optional filters/paging. "
-                    + "Pass 'project' as a comma-separated list of OpenDota match fields (e.g. "
-                    + "\"kills,deaths,assists,hero_id\") to trim each returned match to only those fields "
-                    + "and sharply cut response size.")
+                    + "'project' is a comma-separated list of extra OpenDota match fields to request "
+                    + "(e.g. \"kills,deaths,assists,hero_id\"), added on top of the default fields.")
     public String getPlayerMatches(long account_id,
                                    @ToolParam(required = false) Integer limit,
                                    @ToolParam(required = false) Integer offset,
