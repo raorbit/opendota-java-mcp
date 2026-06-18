@@ -106,11 +106,14 @@ owns the single rate limiter and a shared cache, and have each server forward to
    not the stdio transport, so it logs to the console — redirect it to a file if you
    run it in the background.
 
-   > **Security / trust:** the sidecar binds loopback only (never the network), but it has
-   > **no authentication**, so any local process on the machine can use the API key it holds
-   > — read-only OpenDota calls under your key and the shared rate budget. Only run it on a
-   > host where every local user is trusted. If it starts without `OPENDOTA_API_KEY` it logs
-   > a warning and runs **keyless**, which caps all agents at the 60/min keyless limit.
+   > **Security / trust:** the sidecar binds loopback only (never the network), but by default
+   > it has **no authentication**, so any local process on the machine can use the API key it
+   > holds — read-only OpenDota calls under your key and the shared rate budget. On a host where
+   > not every local user is trusted, require a shared secret: start the sidecar with
+   > `OPENDOTA_SIDECAR_TOKEN=<secret>` and set `opendota.sidecar-token=<secret>` on each agent.
+   > `GET /api/*` then requires a matching `X-Sidecar-Token` header (constant-time compared);
+   > `GET /health` stays open. If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
+   > and runs **keyless**, which caps all agents at the 60/min keyless limit.
 3. Point each client's server at the sidecar by enabling forwarding and **omitting**
    the key from that client's config (the sidecar holds it):
    ```json

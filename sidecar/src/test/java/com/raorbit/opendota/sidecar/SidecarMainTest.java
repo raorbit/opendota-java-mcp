@@ -19,11 +19,16 @@ class SidecarMainTest {
     private static final String DASHED = "opendota.sidecar-port";
     private static final int DEFAULT_PORT = 31337;
 
+    private static final String TOKEN_DOTTED = "opendota.sidecar.token";
+    private static final String TOKEN_DASHED = "opendota.sidecar-token";
+
     @BeforeEach
     @AfterEach
     void clearProperties() {
         System.clearProperty(DOTTED);
         System.clearProperty(DASHED);
+        System.clearProperty(TOKEN_DOTTED);
+        System.clearProperty(TOKEN_DASHED);
     }
 
     @Test
@@ -70,6 +75,20 @@ class SidecarMainTest {
         System.setProperty(DOTTED, "not-a-port");
         assumeTrue(System.getenv("OPENDOTA_SIDECAR_PORT") == null);
         assertThat(SidecarMain.resolvePort()).isEqualTo(DEFAULT_PORT);
+    }
+
+    @Test
+    void resolveTokenDefaultsToNullWhenUnset() {
+        assumeTrue(System.getenv("OPENDOTA_SIDECAR_TOKEN") == null);
+        assertThat(SidecarMain.resolveToken()).isNull();
+    }
+
+    @Test
+    void resolveTokenReadsBothPropertySpellingsWithDottedWinning() {
+        System.setProperty(TOKEN_DASHED, "dash-token");
+        assertThat(SidecarMain.resolveToken()).isEqualTo("dash-token");
+        System.setProperty(TOKEN_DOTTED, "dot-token");
+        assertThat(SidecarMain.resolveToken()).isEqualTo("dot-token");
     }
 
     @Test

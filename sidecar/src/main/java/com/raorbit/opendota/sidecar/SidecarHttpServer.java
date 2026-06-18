@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
 
@@ -36,16 +37,32 @@ public final class SidecarHttpServer implements AutoCloseable {
 
     private static final Logger LOG = Logger.getLogger(SidecarHttpServer.class.getName());
     private static final String API_PREFIX = "/api";
+    /** Request header carrying the optional shared secret an auth-gated sidecar requires. */
+    private static final String TOKEN_HEADER = "X-Sidecar-Token";
 
     private final HttpServer server;
     private final OpenDotaClient client;
+    /** Shared secret required on {@code /api/*}, or {@code null} to accept any local caller. */
+    private final String token;
 
     /**
      * @param port   loopback port to bind, or {@code 0} to pick an ephemeral one (tests)
      * @param client the shared upstream client; this server takes ownership and closes it
      */
     public SidecarHttpServer(int port, OpenDotaClient client) throws IOException {
+        this(port, client, null);
+    }
+
+    /**
+     * @param port   loopback port to bind, or {@code 0} to pick an ephemeral one (tests)
+     * @param client the shared upstream client; this server takes ownership and closes it
+     * @param token  optional shared secret; when non-blank, {@code /api/*} requires a matching
+     *               {@value #TOKEN_HEADER} header (constant-time compared). {@code /health} stays open.
+     */
+    public SidecarHttpServer(int port, OpenDotaClient client, String token) throws IOException {
         this.client = client;
+        String trimmed = token == null ? null : token.trim();
+        this.token = (trimmed == null || trimmed.isEmpty()) ? null : trimmed;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         this.server.createContext("/health", this::handleHealth);
         this.server.createContext(API_PREFIX, this::handleApi);
@@ -54,7 +71,8 @@ public final class SidecarHttpServer implements AutoCloseable {
 
     public void start() {
         server.start();
-        LOG.info(() -> "opendota-sidecar listening on http://127.0.0.1:" + port() + " (keyed=" + client.isKeyed() + ")");
+        LOG.info(() -> "opendota-sidecar listening on http://127.0.0.1:" + port()
+                + " (keyed=" + client.isKeyed() + ", auth=" + (token != null) + ")");
     }
 
     /** The bound port (useful when constructed with port {@code 0}). */
@@ -74,6 +92,10 @@ public final class SidecarHttpServer implements AutoCloseable {
         try {
             if (!"GET".equals(exchange.getRequestMethod())) {
                 respond(exchange, 405, "{\"error\":\"method not allowed\"}");
+                return;
+            }
+            if (!authorized(exchange)) {
+                respond(exchange, 401, "{\"error\":\"unauthorized\"}");
                 return;
             }
             String openDotaPath = toOpenDotaPath(exchange);
@@ -96,6 +118,22 @@ public final class SidecarHttpServer implements AutoCloseable {
                     + ": " + e.getClass().getSimpleName());
             respond(exchange, 500, "{\"error\":\"internal error\"}");
         }
+    }
+
+    /**
+     * Whether the request may proceed: always true when no token is configured; otherwise the
+     * {@value #TOKEN_HEADER} header must match the configured secret (constant-time comparison).
+     */
+    private boolean authorized(HttpExchange exchange) {
+        if (token == null) {
+            return true;
+        }
+        String presented = exchange.getRequestHeaders().getFirst(TOKEN_HEADER);
+        if (presented == null) {
+            return false;
+        }
+        return MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
+                presented.getBytes(StandardCharsets.UTF_8));
     }
 
     /** Translate an inbound {@code /api/...} request target into an OpenDota path with its query. */

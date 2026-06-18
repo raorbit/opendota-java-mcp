@@ -139,6 +139,24 @@ class ForwardingEndToEndTest {
     }
 
     @Test
+    void forwardingClientWithMatchingTokenIsAcceptedAndWithoutItIsRejected() throws Exception {
+        stubUpstream("/api/heroes", 200, "[]");
+        try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "tok")) {
+            gated.start();
+            String base = "http://127.0.0.1:" + gated.port() + "/api";
+            try (OpenDotaClient withToken = OpenDotaClient.forwardingTo(base, 16L * 1024 * 1024, "tok");
+                 OpenDotaClient withoutToken = OpenDotaClient.forwardingTo(base, 16L * 1024 * 1024)) {
+
+                assertThat(withToken.getJson("/heroes")).isEqualTo("[]");
+
+                assertThatThrownBy(() -> withoutToken.getJson("/heroes"))
+                        .isInstanceOf(OpenDotaException.class)
+                        .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(401));
+            }
+        }
+    }
+
+    @Test
     void concurrentForwardingMissesCollapseToOneUpstreamCall() throws Exception {
         // The forwarding client bypasses its OWN single-flight, so N concurrent identical GETs each
         // make a loopback call to the sidecar; the sidecar's shared direct client must collapse them

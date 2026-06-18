@@ -42,7 +42,7 @@ public final class SidecarMain {
         }
         SidecarHttpServer server;
         try {
-            server = new SidecarHttpServer(port, client);
+            server = new SidecarHttpServer(port, client, resolveToken());
         } catch (BindException e) {
             // Most likely a sidecar is already running on this port (the design is one shared
             // process per machine). Fail fast with an actionable message, not a raw stack trace.
@@ -86,5 +86,15 @@ public final class SidecarMain {
             return DEFAULT_PORT;
         }
         return port;
+    }
+
+    /**
+     * Resolve the optional shared-secret token that gates {@code /api/*}: system property
+     * {@code opendota.sidecar.token} (or the dashed {@code opendota.sidecar-token}), else env
+     * {@code OPENDOTA_SIDECAR_TOKEN}, else {@code null} (auth disabled — any local caller accepted).
+     */
+    static String resolveToken() {
+        return System.getProperty("opendota.sidecar.token",
+                System.getProperty("opendota.sidecar-token", System.getenv("OPENDOTA_SIDECAR_TOKEN")));
     }
 }

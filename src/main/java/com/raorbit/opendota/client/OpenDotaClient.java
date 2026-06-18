@@ -68,6 +68,8 @@ public class OpenDotaClient implements AutoCloseable {
     private static final Duration SIDECAR_RETRY_BASE_BACKOFF = Duration.ofMillis(200);
     /** Maximum backoff between sidecar connection retries. */
     private static final Duration SIDECAR_RETRY_MAX_BACKOFF = Duration.ofSeconds(2);
+    /** Request header carrying the optional shared secret to a token-gated sidecar. */
+    private static final String SIDECAR_TOKEN_HEADER = "X-Sidecar-Token";
 
     private final String apiKey;
     private final boolean keyed;
@@ -95,6 +97,12 @@ public class OpenDotaClient implements AutoCloseable {
      * retries briefly on a refused connection (the sidecar may still be starting).
      */
     private final boolean forwarding;
+    /**
+     * Optional shared secret sent as the {@value #SIDECAR_TOKEN_HEADER} header on every
+     * forwarded request, to match a token-gated sidecar. {@code null} = send no header
+     * (the default, matching a sidecar with auth disabled).
+     */
+    private final String forwardingToken;
 
     public OpenDotaClient(String apiKey) {
         this(apiKey, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
@@ -125,8 +133,19 @@ public class OpenDotaClient implements AutoCloseable {
      * @param maxResponseBytes inbound response-size cap, guarding against a misbehaving sidecar
      */
     public static OpenDotaClient forwardingTo(String baseUrl, long maxResponseBytes) {
+        return forwardingTo(baseUrl, maxResponseBytes, null);
+    }
+
+    /**
+     * As {@link #forwardingTo(String, long)}, but also sends {@code token} as the
+     * {@value #SIDECAR_TOKEN_HEADER} header so a token-gated sidecar accepts the request.
+     * A {@code null}/blank token sends no header (matching a sidecar with auth disabled).
+     *
+     * @param token the shared secret the sidecar expects, or {@code null} for no auth
+     */
+    public static OpenDotaClient forwardingTo(String baseUrl, long maxResponseBytes, String token) {
         return new OpenDotaClient(null, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
-                DEFAULT_RATE_LIMIT_BUDGET, maxResponseBytes, DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE, true);
+                DEFAULT_RATE_LIMIT_BUDGET, maxResponseBytes, DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE, true, token);
     }
 
     /**
@@ -148,12 +167,12 @@ public class OpenDotaClient implements AutoCloseable {
     OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, long cacheMaxBytes,
                    Duration rateLimitBudget, long maxResponseBytes, int rateLimitPermitsPerMinute) {
         this(apiKey, baseUrl, cacheMaxEntries, cacheMaxBytes, rateLimitBudget, maxResponseBytes,
-                rateLimitPermitsPerMinute, false);
+                rateLimitPermitsPerMinute, false, null);
     }
 
     private OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, long cacheMaxBytes,
                            Duration rateLimitBudget, long maxResponseBytes, int rateLimitPermitsPerMinute,
-                           boolean forwarding) {
+                           boolean forwarding, String forwardingToken) {
         String trimmed = apiKey == null ? null : apiKey.trim();
         if (trimmed != null && trimmed.isEmpty()) {
             trimmed = null;
@@ -191,6 +210,8 @@ public class OpenDotaClient implements AutoCloseable {
                 .connectTimeout(CONNECT_TIMEOUT)
                 .build();
         this.forwarding = forwarding;
+        String trimmedToken = forwardingToken == null ? null : forwardingToken.trim();
+        this.forwardingToken = (trimmedToken == null || trimmedToken.isEmpty()) ? null : trimmedToken;
     }
 
     /**
@@ -290,12 +311,15 @@ public class OpenDotaClient implements AutoCloseable {
             url += (path.indexOf('?') >= 0 ? "&" : "?") + "api_key=" + encode(apiKey);
         }
 
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(REQUEST_TIMEOUT)
-                .header("User-Agent", USER_AGENT)
-                .GET()
-                .build();
+                .header("User-Agent", USER_AGENT);
+        if (forwardingToken != null) {
+            // Forwarding client → token-gated sidecar: present the shared secret.
+            builder.header(SIDECAR_TOKEN_HEADER, forwardingToken);
+        }
+        HttpRequest request = builder.GET().build();
 
         try {
             // A size-capped subscriber (rather than BodyHandlers.ofString) so a
