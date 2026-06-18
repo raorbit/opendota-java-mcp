@@ -50,6 +50,19 @@ class L2DisabledByDefaultTest {
     }
 
     @Test
+    void flagAcceptsCommonTruthyAndFalsySpellings() {
+        // A system property overrides the env var in resolve(), so these are authoritative.
+        for (String yes : new String[] {"true", "TRUE", "1", "yes", "on", " true "}) {
+            System.setProperty(FLAG_PROP, yes);
+            assertThat(L2Config.isEnabled()).as("'%s' enables L2", yes).isTrue();
+        }
+        for (String no : new String[] {"false", "0", "no", "off", "maybe", ""}) {
+            System.setProperty(FLAG_PROP, no);
+            assertThat(L2Config.isEnabled()).as("'%s' does not enable L2", no).isFalse();
+        }
+    }
+
+    @Test
     void flagOnBuildsGatewayAndOpensTheConfiguredDb(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
         System.setProperty(FLAG_PROP, "true");

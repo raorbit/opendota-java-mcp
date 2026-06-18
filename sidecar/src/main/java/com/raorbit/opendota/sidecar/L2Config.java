@@ -3,6 +3,7 @@ package com.raorbit.opendota.sidecar;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.logging.Logger;
 
 /**
@@ -67,7 +68,27 @@ public final class L2Config {
 
     /** Whether the L2 tier is enabled via {@code OPENDOTA_SIDECAR_L2=true} / {@code -Dopendota.sidecar.l2=true}. */
     public static boolean isEnabled() {
-        return Boolean.parseBoolean(resolve(FLAG_PROP, FLAG_ENV, "false"));
+        return isTruthy(trimToNull(resolve(FLAG_PROP, FLAG_ENV, null)));
+    }
+
+    /**
+     * Accept the common truthy/falsy spellings (so {@code 1}/{@code yes}/{@code on} enable L2, not just
+     * the exact {@code true} that {@link Boolean#parseBoolean} requires); warn and default to off on an
+     * unrecognized non-blank value rather than silently disabling.
+     */
+    private static boolean isTruthy(String raw) {
+        if (raw == null) {
+            return false;
+        }
+        switch (raw.toLowerCase(Locale.ROOT)) {
+            case "true": case "1": case "yes": case "on":
+                return true;
+            case "false": case "0": case "no": case "off":
+                return false;
+            default:
+                LOG.warning(() -> "L2 config " + FLAG_PROP + "='" + raw + "' is not a recognized boolean; L2 disabled");
+                return false;
+        }
     }
 
     /** Build a config from system properties / environment with the spec's defaults. */
