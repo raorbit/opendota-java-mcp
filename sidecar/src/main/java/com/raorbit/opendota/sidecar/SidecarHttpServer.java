@@ -102,6 +102,12 @@ public final class SidecarHttpServer implements AutoCloseable {
     }
 
     private void handleHealth(HttpExchange exchange) throws IOException {
+        // The JDK HttpServer matches contexts by path PREFIX, so reject anything but the exact path
+        // (e.g. /healthz) rather than serving it from this handler.
+        if (!"/health".equals(exchange.getRequestURI().getPath())) {
+            respond(exchange, 404, "{\"error\":\"not found\"}");
+            return;
+        }
         if (!"GET".equals(exchange.getRequestMethod())) {
             respond(exchange, 405, "{\"error\":\"method not allowed\"}");
             return;
@@ -115,39 +121,50 @@ public final class SidecarHttpServer implements AutoCloseable {
      * its keep. Token-gated like {@code /api} when a secret is configured.
      */
     private void handleStats(HttpExchange exchange) throws IOException {
-        if (!"GET".equals(exchange.getRequestMethod())) {
-            respond(exchange, 405, "{\"error\":\"method not allowed\"}");
-            return;
+        try {
+            // Context matching is by prefix, so reject anything but the exact /stats path.
+            if (!"/stats".equals(exchange.getRequestURI().getPath())) {
+                respond(exchange, 404, "{\"error\":\"not found\"}");
+                return;
+            }
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 405, "{\"error\":\"method not allowed\"}");
+                return;
+            }
+            if (!authorized(exchange)) {
+                respond(exchange, 401, "{\"error\":\"unauthorized\"}");
+                return;
+            }
+            OpenDotaClient.Stats s = client.stats();
+            StringBuilder json = new StringBuilder("{\"keyed\":").append(s.keyed())
+                    .append(",\"cacheHits\":").append(s.cacheHits())
+                    .append(",\"cacheMisses\":").append(s.cacheMisses())
+                    .append(",\"cacheEntries\":").append(s.cacheEntries())
+                    .append(",\"cacheBytes\":").append(s.cacheBytes())
+                    .append(",\"availablePermits\":").append(s.availablePermits())
+                    .append(",\"permitsPerMinute\":").append(s.permitsPerMinute());
+            // Additively expose the L2 counters when the durable tier is enabled (the existing fields
+            // above are unchanged, so statsReportsCacheAndLimiterCounters keeps passing).
+            if (gateway != null) {
+                L2CachingGateway.L2Stats l2 = gateway.stats();
+                json.append(",\"l2Enabled\":true")
+                        .append(",\"l2Hit\":").append(l2.l2Hit())
+                        .append(",\"l2Miss\":").append(l2.l2Miss())
+                        .append(",\"l2Store\":").append(l2.l2Store())
+                        .append(",\"l2StoreSkippedUnparsed\":").append(l2.l2StoreSkippedUnparsed())
+                        .append(",\"l2PatchBust\":").append(l2.l2PatchBust())
+                        .append(",\"l2Error\":").append(l2.l2Error())
+                        .append(",\"noStore\":").append(l2.noStore());
+            } else {
+                json.append(",\"l2Enabled\":false");
+            }
+            json.append("}");
+            respond(exchange, 200, json.toString());
+        } catch (RuntimeException e) {
+            // Mirror handleApi: never let an unexpected error leak a bare, unlogged 500.
+            LOG.warning(() -> "unexpected error handling /stats: " + e.getClass().getSimpleName());
+            respond(exchange, 500, "{\"error\":\"internal error\"}");
         }
-        if (!authorized(exchange)) {
-            respond(exchange, 401, "{\"error\":\"unauthorized\"}");
-            return;
-        }
-        OpenDotaClient.Stats s = client.stats();
-        StringBuilder json = new StringBuilder("{\"keyed\":").append(s.keyed())
-                .append(",\"cacheHits\":").append(s.cacheHits())
-                .append(",\"cacheMisses\":").append(s.cacheMisses())
-                .append(",\"cacheEntries\":").append(s.cacheEntries())
-                .append(",\"cacheBytes\":").append(s.cacheBytes())
-                .append(",\"availablePermits\":").append(s.availablePermits())
-                .append(",\"permitsPerMinute\":").append(s.permitsPerMinute());
-        // Additively expose the L2 counters when the durable tier is enabled (the existing fields
-        // above are unchanged, so statsReportsCacheAndLimiterCounters keeps passing).
-        if (gateway != null) {
-            L2CachingGateway.L2Stats l2 = gateway.stats();
-            json.append(",\"l2Enabled\":true")
-                    .append(",\"l2Hit\":").append(l2.l2Hit())
-                    .append(",\"l2Miss\":").append(l2.l2Miss())
-                    .append(",\"l2Store\":").append(l2.l2Store())
-                    .append(",\"l2StoreSkippedUnparsed\":").append(l2.l2StoreSkippedUnparsed())
-                    .append(",\"l2PatchBust\":").append(l2.l2PatchBust())
-                    .append(",\"l2Error\":").append(l2.l2Error())
-                    .append(",\"noStore\":").append(l2.noStore());
-        } else {
-            json.append(",\"l2Enabled\":false");
-        }
-        json.append("}");
-        respond(exchange, 200, json.toString());
     }
 
     private void handleApi(HttpExchange exchange) throws IOException {

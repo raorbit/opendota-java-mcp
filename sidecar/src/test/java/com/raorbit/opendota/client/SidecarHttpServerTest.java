@@ -257,6 +257,14 @@ class SidecarHttpServerTest {
     }
 
     @Test
+    void prefixPathsOutsideTheExactContextAre404() throws Exception {
+        // JDK HttpServer matches contexts by prefix; /stats and /health must reject longer paths
+        // (e.g. /statsZZZ, /healthz) rather than serve them from those handlers.
+        assertThat(get("/statsZZZ").statusCode()).isEqualTo(404);
+        assertThat(get("/healthz").statusCode()).isEqualTo(404);
+    }
+
+    @Test
     void statsReportsCacheAndLimiterCounters() throws Exception {
         stubUpstream("/api/players/123", 200, "{\"profile\":{\"account_id\":123}}");
 
