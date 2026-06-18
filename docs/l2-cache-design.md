@@ -278,8 +278,11 @@ PRAGMA foreign_keys = ON;        -- harmless; future-proofs if relations are add
 ```
 
 `busy_timeout` matters because `SidecarHttpServer` dispatches each request on its own virtual
-thread, so many readers can hit the connection concurrently (see §7.1 for the concurrency model
-that keeps writes single-threaded).
+thread, so many readers can hit the database concurrently (see §7.1 for the concurrency model
+that keeps writes single-threaded and reads parallel). The read-pool connections (§7.1) additionally
+set `PRAGMA query_only = true` as a defensive guard so a read path can never write, and `busy_timeout`
+to ride out brief WAL contention; WAL itself is a database-level setting established by the write
+connection, so read connections inherit it without re-declaring it.
 
 **Migration policy — hand-rolled drop+rebuild, NO Flyway.** A `SCHEMA_VERSION` integer constant
 lives in the gateway. On open, read `meta.value WHERE key='schema_version'`:
@@ -316,14 +319,31 @@ with the limit computed from the overage.
 
 ## 7. Concurrency and integration ordering
 
-### 7.1 Writer model
-Use a **single JDBC connection** guarded so that **writes are serialized** while reads can proceed
-under WAL. The simplest robust approach for a low-write-rate cache: one shared connection with all
-*write* operations (`put`, evict, patch-bust, rebuild) synchronized on a single monitor;
-WAL + `busy_timeout` covers any reader/writer overlap. Given low write volume (only PERMANENT
-matches and occasional static data), a single connection with synchronized writes is sufficient
-and avoids a connection-pool dependency. Reads may share the same connection (SQLite serializes
-internally) — measure before adding a pool.
+### 7.1 Connection model — single writer, pooled readers
+**Writes** use a **single JDBC connection** with all *write* operations (`put`, evict, patch-bust,
+rebuild) serialized on the store's monitor; WAL + `busy_timeout` cover reader/writer overlap. Given
+low write volume (only PERMANENT matches and occasional static data), one serialized write connection
+is sufficient and avoids a write-side pool.
+
+**Reads** use a **bounded pool of dedicated read-only connections** (`OPENDOTA_SIDECAR_L2_READ_POOL`,
+default 4, clamped to `[1, 64]`). The hot `get()` path borrows a connection from the pool, runs its
+single-row lookup, and returns it; since WAL allows many concurrent readers alongside the one writer,
+up to *pool-size* L2-hit reads execute **in parallel** — not merely decoupled from writes, but parallel
+with each other. Borrowing is best-effort (spec §7.2): if the pool is saturated past a short timeout
+(near-impossible for microsecond point lookups), `get()` degrades to a cache miss and the gateway fetches
+upstream rather than blocking the request.
+
+> **Decision note.** An earlier revision of this section specified a single shared connection for both
+> reads and writes ("measure before adding a pool"). We have since deliberately adopted the read pool:
+> the sidecar fans every request onto its own virtual thread, so cache-hit reads are the dominant,
+> highly-concurrent path, and serializing them behind one connection/lock left obvious read throughput
+> on the table. The pool is hand-rolled over an `ArrayBlockingQueue` (no connection-pool dependency —
+> the locked stack still permits only `sqlite-jdbc`).
+
+**In-memory exception.** For a `:memory:` db there is no pool: a second `:memory:` connection is a
+separate, empty database, so `get()` shares the single connection under the store monitor (reads then
+serialize with writes — correct for one db, and in-memory is a test/degenerate mode, not the production
+file-backed path).
 
 ### 7.2 Where the gateway sits relative to single-flight (the ordering subtlety)
 The gateway wraps `client.getJson`, so the request order per call is:
