@@ -31,8 +31,29 @@ start() {
   mkdir -p "$RUN_DIR"
   echo "starting sidecar on 127.0.0.1:$PORT (logs: $LOG_FILE)"
   nohup java -jar "$JAR" >"$LOG_FILE" 2>&1 &
-  echo $! > "$PID_FILE"
-  echo "started (pid $(cat "$PID_FILE"))"
+  local pid=$!
+  echo "$pid" > "$PID_FILE"
+  # Verify it actually came up rather than reporting a stale 'started' for a JVM that died at once
+  # (e.g. BindException because the port is taken). Poll /health for ~5s; bail if the process exits.
+  if command -v curl >/dev/null 2>&1; then
+    for _ in $(seq 1 25); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        echo "sidecar exited during startup — see $LOG_FILE"; rm -f "$PID_FILE"; exit 1
+      fi
+      if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        echo "started (pid $pid); /health ok on 127.0.0.1:$PORT"; return 0
+      fi
+      sleep 0.2
+    done
+    echo "started (pid $pid) but /health did not answer within 5s — check $LOG_FILE"
+  else
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "started (pid $pid)"
+    else
+      echo "sidecar exited during startup — see $LOG_FILE"; rm -f "$PID_FILE"; exit 1
+    fi
+  fi
 }
 
 stop() {
