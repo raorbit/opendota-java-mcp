@@ -132,6 +132,32 @@ class PlayerToolsTest {
     }
 
     @Test
+    void getPlayerPeersBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        tools.getPlayerPeers(42L);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/players/42/peers");
+    }
+
+    @Test
+    void getPlayerTotalsBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        tools.getPlayerTotals(42L);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client).getJson(path.capture());
+        assertThat(path.getValue()).isEqualTo("/players/42/totals");
+    }
+
+    @Test
     void getPlayerReturnsErrorEnvelopeOnException() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         when(client.getJson(anyString()))

@@ -94,6 +94,32 @@ public class PlayerTools {
         }
     }
 
+    @Tool(name = "get_player_peers",
+            description = "Players a Steam32 account_id has played WITH most often (teammates), with win rates.")
+    public String getPlayerPeers(long account_id) {
+        String path = "/players/" + account_id + "/peers";
+        try {
+            return client.getJson(path);
+        } catch (OpenDotaException e) {
+            return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
+        }
+    }
+
+    @Tool(name = "get_player_totals",
+            description = "Career totals/averages (kills, GPM, XPM, etc.) aggregated across a Steam32 account_id's matches.")
+    public String getPlayerTotals(long account_id) {
+        String path = "/players/" + account_id + "/totals";
+        try {
+            return client.getJson(path);
+        } catch (OpenDotaException e) {
+            return ToolResults.fromException(e);
+        } catch (RuntimeException e) {
+            return ToolResults.internalError(path);
+        }
+    }
+
     @Tool(name = "get_player_matches",
             description = "Match history for a Steam32 account_id, with optional filters/paging. "
                     + "Pass 'project' as a comma-separated list of OpenDota match fields (e.g. "

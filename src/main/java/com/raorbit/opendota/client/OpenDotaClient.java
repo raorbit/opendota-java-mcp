@@ -429,6 +429,14 @@ public class OpenDotaClient implements AutoCloseable {
         if (p.startsWith("/constants/")) {
             return Duration.ofHours(6);
         }
+        if (p.startsWith("/benchmarks")) {
+            // Percentile benchmarks over recent matches; a slow-moving aggregate like heroStats.
+            return Duration.ofHours(1);
+        }
+        if (p.startsWith("/distributions")) {
+            // MMR/rank distributions across the player base; change very slowly.
+            return Duration.ofHours(6);
+        }
         if (p.startsWith("/proMatches") || p.startsWith("/publicMatches")) {
             return Duration.ofSeconds(45);
         }
