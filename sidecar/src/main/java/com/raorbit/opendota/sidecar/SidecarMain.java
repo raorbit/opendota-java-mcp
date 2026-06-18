@@ -3,6 +3,7 @@ package com.raorbit.opendota.sidecar;
 import com.raorbit.opendota.client.OpenDotaClient;
 
 import java.io.IOException;
+import java.net.BindException;
 import java.util.concurrent.CountDownLatch;
 import java.util.logging.Logger;
 
@@ -31,7 +32,26 @@ public final class SidecarMain {
     public static void main(String[] args) throws IOException, InterruptedException {
         int port = resolvePort();
         OpenDotaClient client = new OpenDotaClient(System.getenv("OPENDOTA_API_KEY"));
-        SidecarHttpServer server = new SidecarHttpServer(port, client);
+        if (!client.isKeyed()) {
+            // Easy to miss: the agents no longer carry the key, so this process is the only
+            // place it must be set. Keyless silently caps every agent at the 60/min tier.
+            LOG.warning("OPENDOTA_API_KEY is not set: running keyless, so every forwarding agent "
+                    + "jointly shares OpenDota's 60 requests/minute keyless limit. Set the key on "
+                    + "this process to share the 300/minute keyed budget instead.");
+        }
+        SidecarHttpServer server;
+        try {
+            server = new SidecarHttpServer(port, client);
+        } catch (BindException e) {
+            // Most likely a sidecar is already running on this port (the design is one shared
+            // process per machine). Fail fast with an actionable message, not a raw stack trace.
+            client.close();
+            LOG.severe("cannot bind 127.0.0.1:" + port + " (" + e.getMessage() + ") — is a sidecar "
+                    + "already running, or the port already in use? Stop the other process or pick "
+                    + "another port via OPENDOTA_SIDECAR_PORT / -Dopendota.sidecar.port.");
+            System.exit(1);
+            return;   // unreachable after exit; keeps 'server' definitely assigned for the compiler
+        }
         Runtime.getRuntime().addShutdownHook(new Thread(server::close, "sidecar-shutdown"));
         server.start();
         // Park the main thread so the process stays up as a long-lived service until
