@@ -115,6 +115,12 @@ owns the single rate limiter and a shared cache, and have each server forward to
    > `GET /api/*` then requires a matching `X-Sidecar-Token` header (constant-time compared);
    > `GET /health` stays open. If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
    > and runs **keyless**, which caps all agents at the 60/min keyless limit.
+
+   An optional **durable L2 cache** (disk-backed SQLite, off by default) lets the sidecar serve
+   immutable data — fully-parsed matches and per-patch static data — across restarts. Enable it with
+   `OPENDOTA_SIDECAR_L2=true` (or `-Dopendota.sidecar.l2=true`); the SQLite driver ships in the
+   sidecar's `lib/` directory next to its jar. Design and tuning knobs are in
+   [`docs/l2-cache-design.md`](l2-cache-design.md).
 3. Point each client's server at the sidecar by enabling forwarding and **omitting**
    the key from that client's config (the sidecar holds it):
    ```json
