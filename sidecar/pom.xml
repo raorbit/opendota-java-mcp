@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.raorbit</groupId>
+    <artifactId>opendota-sidecar</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>opendota-sidecar</name>
+    <description>
+        Shared localhost sidecar that owns the single OpenDota rate limiter and cache for
+        several co-running MCP server processes. A standalone plain-Java project (no Spring),
+        deliberately independent of the locked opendota-mcp build.
+    </description>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <properties>
+        <!-- Keep maven.compiler.release in sync with the root pom's <java.version> (21).
+             This is a standalone build with no parent, so the two are not otherwise linked. -->
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!--
+          No runtime dependencies on purpose: the sidecar uses only the JDK
+          (com.sun.net.httpserver.HttpServer + java.net.http) and the plain-Java
+          OpenDota client classes copied into this module (kept byte-identical to the
+          root copies, enforced by ClientCopyDriftTest). Tests use JUnit 5 + AssertJ.
+        -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.12.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.27.7</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>opendota-sidecar-1.0.0</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
+            </plugin>
+            <!-- Build a runnable jar: java -jar target/opendota-sidecar-1.0.0.jar -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>com.raorbit.opendota.sidecar.SidecarMain</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

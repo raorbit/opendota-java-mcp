@@ -119,13 +119,42 @@ export OPENDOTA_API_KEY=00000000-0000-0000-0000-000000000000
 
 ### Client tuning (optional)
 
-Two client internals can be tuned via standard Spring properties (environment
+Client internals can be tuned via standard Spring properties (environment
 variables, JVM `-D` flags, or an external `application.properties`):
 
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `opendota.cache-max-entries` | `4096` | Max cached responses retained before the nearest-to-expiry entry is evicted. |
 | `opendota.rate-limit-budget` | `10s` | Max time a request waits for a rate-limit permit before returning a rate-limited error. |
+| `opendota.rate-limit-permits-per-minute` | `0` | Outbound permits/minute (`0` = tier default: 300 keyed / 60 keyless). When several server processes share one API key, set this to `tier_budget / process_count` so their combined rate stays within OpenDota's real per-key ceiling. |
+| `opendota.sidecar-enabled` | `false` | Forward every OpenDota call to a shared local sidecar instead of calling OpenDota directly — see [Running several agents](#running-several-agents-shared-sidecar). |
+| `opendota.sidecar-host` / `opendota.sidecar-port` | `127.0.0.1` / `31337` | Address of the shared sidecar (used only when `sidecar-enabled` is `true`). |
+
+### Running several agents (shared sidecar)
+
+Each MCP client launches its own `java -jar` subprocess, so running *N* agents on
+one machine means *N* independent servers — each with its own rate limiter. Since
+OpenDota enforces its limit per **API key**, *N* servers sharing one key can jointly
+overshoot the real ceiling and start getting `429`s. The **sidecar** fixes this: one
+small local process owns the single rate limiter and the shared cache, and every
+agent forwards its calls to it, so the real budget is honoured exactly once.
+
+```sh
+# build it (a separate, dependency-light project under sidecar/)
+mvn -f sidecar/pom.xml clean package    # -> sidecar/target/opendota-sidecar-1.0.0.jar
+
+# run it once per machine (it holds the key; the agents then don't need one)
+OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.0.0.jar
+```
+
+Then point each agent at it by setting `opendota.sidecar-enabled=true` (and leaving
+`OPENDOTA_API_KEY` out of the per-client config). The sidecar binds `127.0.0.1` only,
+exposes `GET /health`, and defaults to port `31337` (override with
+`OPENDOTA_SIDECAR_PORT` or `-Dopendota.sidecar.port=<port>`, and point agents at the same
+port with `opendota.sidecar-port`). If an agent starts before the sidecar, it retries the
+connection briefly. The sidecar has no authentication, so only run it on a host where every
+local user is trusted. See
+[`docs/mcp-registration.md`](docs/mcp-registration.md#shared-sidecar-for-multiple-agents).
 
 ### Steam32 account IDs
 
@@ -142,7 +171,8 @@ connection. The application is configured to keep stdout clean:
 - the Spring Boot startup banner is disabled;
 - the console log appender is turned off (`logging.threshold.console=OFF`), so no
   application logs are written to stdout;
-- all logs are written to `./logs/opendota-mcp.log` instead.
+- all logs are written to `./logs/opendota-mcp-<pid>.log` instead (per-process, so
+  several co-running servers don't interleave into one file).
 
 When modifying this project, **never** call `System.out.println` (or otherwise
 write to stdout) from application code. Route diagnostics through the logger so

@@ -8,7 +8,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -320,6 +322,140 @@ class OpenDotaClientTest {
         // An absurd cap (here 512 MiB, over the 256 MiB ceiling) is rejected so it
         // can never drive the read buffer into an OutOfMemoryError.
         assertThatThrownBy(() -> new OpenDotaClient(null, base, 512L * 1024 * 1024))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void configuredPermitsPerMinuteThrottlesOutbound() throws Exception {
+        // A configured permits/min budget (here 1) must be honored, not the tier
+        // default of 60 keyless. /live is no-store, so each call reaches the limiter;
+        // the first consumes the only permit and the second (non-blocking budget)
+        // fails fast with a client-side 429.
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/live", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 200, "[]");
+        });
+
+        OpenDotaClient client =
+                new OpenDotaClient(null, base, 4096, 64L * 1024 * 1024, Duration.ZERO, 16L * 1024 * 1024, 1);
+
+        assertThat(client.getJson("/live")).isEqualTo("[]");
+        assertThatThrownBy(() -> client.getJson("/live"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(429));
+        assertThat(hits.get()).isEqualTo(1);
+    }
+
+    @Test
+    void forwardingClientBypassesLocalCache() throws Exception {
+        // A forwarding client (pointed at the sidecar) must NOT cache: the sidecar owns
+        // the shared cache. /players/* is cacheable for a direct client, so two identical
+        // calls hitting upstream twice proves the local cache is bypassed when forwarding.
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/players/123", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 200, "{\"profile\":{\"account_id\":123}}");
+        });
+
+        OpenDotaClient client = OpenDotaClient.forwardingTo(base, 16L * 1024 * 1024);
+
+        client.getJson("/players/123");
+        client.getJson("/players/123");
+
+        assertThat(hits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void forwardingClientDoesNotAppendApiKey() throws Exception {
+        // A forwarding client holds no key (the sidecar does), so it must never append one.
+        stub("/api/heroes", 200, "[]");
+
+        OpenDotaClient client = OpenDotaClient.forwardingTo(base, 16L * 1024 * 1024);
+
+        assertThat(client.isKeyed()).isFalse();
+        client.getJson("/heroes");
+
+        assertThat(received).hasSize(1);
+        assertThat(received.get(0)).doesNotContain("api_key");
+    }
+
+    /** Reserve then release a loopback port, returning a port number nothing is listening on. */
+    private static int freeLoopbackPort() throws IOException {
+        try (ServerSocket s = new ServerSocket(0, 0, InetAddress.getLoopbackAddress())) {
+            return s.getLocalPort();
+        }
+    }
+
+    @Test
+    void forwardingClientRetriesARefusedConnectionThenSucceeds() throws Exception {
+        // The forwarding client retries a refused sidecar connection while the sidecar is
+        // still binding its port. Leave a free port closed, then bind a server on it shortly
+        // after the call starts; the retry loop should connect once it is up.
+        int port = freeLoopbackPort();
+        OpenDotaClient client = OpenDotaClient.forwardingTo("http://127.0.0.1:" + port + "/api", 16L * 1024 * 1024);
+
+        HttpServer[] late = new HttpServer[1];
+        Thread binder = new Thread(() -> {
+            try {
+                Thread.sleep(300);   // refused for a moment, then comes up — within the retry budget
+                HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+                s.createContext("/api/heroes", exchange -> respond(exchange, 200, "[]"));
+                s.start();
+                late[0] = s;
+            } catch (IOException | InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        binder.start();
+        try {
+            assertThat(client.getJson("/heroes")).isEqualTo("[]");
+        } finally {
+            binder.join(2000);
+            if (late[0] != null) {
+                late[0].stop(0);
+            }
+        }
+    }
+
+    @Test
+    void forwardingClientFailsCleanlyWhenSidecarNeverComesUp() throws Exception {
+        // With no sidecar listening, the forwarding client exhausts its retry budget and
+        // surfaces a clean transport-level (status 0) error instead of hanging indefinitely.
+        int port = freeLoopbackPort();
+        OpenDotaClient client = OpenDotaClient.forwardingTo("http://127.0.0.1:" + port + "/api", 16L * 1024 * 1024);
+
+        long startNanos = System.nanoTime();
+        assertThatThrownBy(() -> client.getJson("/heroes"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(0));
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        // Must fail fast-ish — nowhere near the original 30s budget.
+        assertThat(elapsedMs).isLessThan(20_000L);
+    }
+
+    @Test
+    void forwardingClientEnforcesResponseSizeCap() {
+        // forwardingTo documents maxResponseBytes as a guard against a misbehaving sidecar;
+        // an oversized body on the forwarding path must abort just like the direct path.
+        stub("/api/heroes", 200, "x".repeat(4096));
+
+        OpenDotaClient client = OpenDotaClient.forwardingTo(base, 1024);
+
+        assertThatThrownBy(() -> client.getJson("/heroes"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(0);
+                    assertThat(e.responseBody()).contains("exceeded").contains("cap");
+                });
+    }
+
+    @Test
+    void negativePermitsPerMinuteIsRejected() {
+        // 0 means "tier default"; a negative value is a config typo and fails fast.
+        assertThatThrownBy(
+                () -> new OpenDotaClient(null, base, 4096, 64L * 1024 * 1024, Duration.ofSeconds(10), 1024L, -1))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

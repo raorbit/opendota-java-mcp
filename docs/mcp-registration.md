@@ -78,6 +78,68 @@ exporting `OPENDOTA_API_KEY` as a real environment variable in your shell or OS
 keychain and leaving the value in the JSON empty, rather than inlining the secret
 into a file at all.
 
+## Shared sidecar for multiple agents
+
+If you run several agents on one machine that share a single `OPENDOTA_API_KEY`,
+their independent rate limiters can jointly exceed OpenDota's real per-key limit
+(it is enforced per key, not per process). Run the **sidecar** so one local process
+owns the single rate limiter and a shared cache, and have each server forward to it.
+
+1. Build the sidecar (a separate, dependency-light project under `sidecar/`). It is its
+   own Maven build — the root `mvn package` does **not** build or test it, so build and
+   test it on its own:
+   ```sh
+   mvn -f sidecar/pom.xml clean package   # build + test
+   # -> sidecar/target/opendota-sidecar-1.0.0.jar
+   ```
+2. Run it once per machine, giving it the key (the agents then do not need one):
+   ```powershell
+   # PowerShell
+   $env:OPENDOTA_API_KEY = '<uuid>'; java -jar sidecar\target\opendota-sidecar-1.0.0.jar
+   ```
+   ```sh
+   # bash
+   OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.0.0.jar
+   ```
+   It binds `127.0.0.1:31337` (override with `OPENDOTA_SIDECAR_PORT` or
+   `-Dopendota.sidecar.port=<port>`) and serves `GET /health`. It is a plain HTTP process,
+   not the stdio transport, so it logs to the console — redirect it to a file if you
+   run it in the background.
+
+   > **Security / trust:** the sidecar binds loopback only (never the network), but it has
+   > **no authentication**, so any local process on the machine can use the API key it holds
+   > — read-only OpenDota calls under your key and the shared rate budget. Only run it on a
+   > host where every local user is trusted. If it starts without `OPENDOTA_API_KEY` it logs
+   > a warning and runs **keyless**, which caps all agents at the 60/min keyless limit.
+3. Point each client's server at the sidecar by enabling forwarding and **omitting**
+   the key from that client's config (the sidecar holds it):
+   ```json
+   {
+     "mcpServers": {
+       "opendota": {
+         "command": "java",
+         "args": [
+           "-Dopendota.sidecar-enabled=true",
+           "-jar",
+           "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.0.0.jar"
+         ]
+       }
+     }
+   }
+   ```
+   (Or set `opendota.sidecar-enabled=true` via the environment or an external
+   `application.properties`; JVM `-D` flags must come before `-jar`.) An agent that
+   starts before the sidecar retries the connection briefly; if the sidecar is down or the
+   port is wrong, tool calls return a clean error (after a short retry) rather than failing
+   the session.
+
+   To use a **non-default port**, set it on *both* sides: start the sidecar with
+   `OPENDOTA_SIDECAR_PORT` (or `-Dopendota.sidecar.port=<port>`) and point each agent at the
+   same port with `opendota.sidecar-port`. Note the agent's Spring property is dashed
+   (`opendota.sidecar-port`) while the sidecar's own override is dotted
+   (`opendota.sidecar.port`); the sidecar also accepts the dashed `-Dopendota.sidecar-port=<port>`
+   so the two cannot be silently mismatched by separator.
+
 ## Running the server directly
 
 You can also launch the jar yourself, for example to smoke-test it before
