@@ -56,8 +56,14 @@ public class OpenDotaClient implements AutoCloseable {
     private static final int MAX_UPSTREAM_SNIPPET = 512;
     /** Permits/min sentinel: {@code 0} = derive from the tier (300 keyed / 60 keyless). */
     private static final int DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE = 0;
-    /** Total time a forwarding client retries a refused sidecar connection before giving up. */
-    private static final Duration SIDECAR_RETRY_BUDGET = Duration.ofSeconds(30);
+    /**
+     * Total time a forwarding client retries a refused sidecar connection before giving up.
+     * Sized for a brief sidecar start-up bind race, <em>not</em> for a sidecar that is down:
+     * a refused connection is indistinguishable from "not running / wrong port", so every
+     * tool call stalls for this long when the sidecar is stopped or misconfigured. Keep it
+     * short so a dead sidecar fails fast with a clean error instead of hanging the call.
+     */
+    private static final Duration SIDECAR_RETRY_BUDGET = Duration.ofSeconds(3);
     /** Initial backoff between sidecar connection retries (doubles up to the cap). */
     private static final Duration SIDECAR_RETRY_BASE_BACKOFF = Duration.ofMillis(200);
     /** Maximum backoff between sidecar connection retries. */
