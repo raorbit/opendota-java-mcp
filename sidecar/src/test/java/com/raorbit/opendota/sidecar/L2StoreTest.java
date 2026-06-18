@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link L2Store}: pragmas, the hand-rolled schema_version drop+rebuild migration
@@ -138,6 +139,44 @@ class L2StoreTest {
         }
     }
 
+    @Test
+    void initCountersReseedsUtf8ByteTotalAcrossReopenForNonAscii(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // A body with a 4-byte emoji and a 3-byte CJK char: UTF-8 bytes != UTF-16 length != char count,
+        // so seeding from char length on reopen (rather than SUM(LENGTH(CAST(body AS BLOB)))) would diverge.
+        String body = "{\"n\":\"😀漢\"}";
+        long expected = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/matches/1", body, Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.totalBodyBytes()).isEqualTo(expected);
+        }
+        // Reopen over the same file: initCounters re-seeds the byte total in UTF-8 bytes, not char count.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            assertThat(store.totalBodyBytes()).isEqualTo(expected);
+            assertThat(store.rowCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void zeroRowEvictionAndPatchBustReturnZeroAndLeaveTotalsUnchanged(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // Empty table: evicting from nothing is a no-op and the totals stay zero.
+            assertThat(store.evictOldest(5)).isZero();
+            assertThat(store.totalBodyBytes()).isZero();
+            assertThat(store.rowCount()).isZero();
+
+            // A match row (patch_id = null) is not patch-scoped, so patchBust deletes nothing and it survives.
+            store.put("/matches/1", "{}", Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            long bytesBefore = store.totalBodyBytes();
+            long rowsBefore = store.rowCount();
+            assertThat(store.patchBust()).isZero();
+            assertThat(store.totalBodyBytes()).isEqualTo(bytesBefore);
+            assertThat(store.rowCount()).isEqualTo(rowsBefore);
+            assertThat(store.get("/matches/1")).as("a non-patch-scoped row survives a bust with no matches").isNotNull();
+        }
+    }
+
     // ---- read-connection pool (spec §7.1) ----
 
     @Test
@@ -197,6 +236,21 @@ class L2StoreTest {
             assertThat(again).isNotNull();
             held.add(again);
             held.forEach(store::returnReadForTest);
+        }
+    }
+
+    @Test
+    void readPoolConnectionsRejectWritesViaQueryOnlyPragma(@TempDir Path tmp) throws Exception {
+        try (L2Store store = new L2Store(tmp.resolve("l2.db"), L2Store.SCHEMA_VERSION, 2)) {
+            Connection c = store.borrowReadForTest(1000);
+            assertThat(c).isNotNull();
+            try (Statement st = c.createStatement()) {
+                // applyReadPragmas sets PRAGMA query_only = true, so a write on a read connection is rejected.
+                assertThatThrownBy(() -> st.executeUpdate("DELETE FROM cache_entries"))
+                        .isInstanceOf(SQLException.class);
+            } finally {
+                store.returnReadForTest(c);
+            }
         }
     }
 
