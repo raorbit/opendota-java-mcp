@@ -26,6 +26,10 @@ class L2ClassifyTest {
             "/matches,                             NO_STORE",
             // static reference data -> PERMANENT (patch-scoped)
             "/heroes,                              PERMANENT",
+            // /heroes/{id}/* are rolling aggregates, not static -> TTL (never pinned as PERMANENT)
+            "/heroes/14,                           TTL",
+            "/heroes/14/matches,                   TTL",
+            "/heroes/14/matchups,                  TTL",
             "/heroStats,                           PERMANENT",
             "/heroStats?foo=1,                     PERMANENT",
             "/constants/items,                     PERMANENT",
