@@ -44,8 +44,10 @@ jobs:
       # Compute checksums so downloads can be verified.
       - name: Compute SHA-256 checksums
         run: |
-          sha256sum target/opendota-mcp-1.0.0.jar > target/opendota-mcp-1.0.0.jar.sha256
-          sha256sum dist/opendota-sidecar-1.0.0.zip > dist/opendota-sidecar-1.0.0.zip.sha256
+          # cd into each dir so the .sha256 records only the basename — otherwise it embeds
+          # target/ and dist/ and `sha256sum -c` fails for downloaders who have the file flat.
+          (cd target && sha256sum opendota-mcp-1.0.0.jar > opendota-mcp-1.0.0.jar.sha256)
+          (cd dist && sha256sum opendota-sidecar-1.0.0.zip > opendota-sidecar-1.0.0.zip.sha256)
           cat target/opendota-mcp-1.0.0.jar.sha256 dist/opendota-sidecar-1.0.0.zip.sha256
 
       - name: Create GitHub Release and upload artifacts
