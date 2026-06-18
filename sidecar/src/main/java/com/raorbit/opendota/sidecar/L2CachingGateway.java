@@ -158,21 +158,13 @@ public final class L2CachingGateway implements AutoCloseable {
         }
     }
 
-    /** Delete oldest rows until within both the row-count and byte caps (best-effort, spec §6.4). */
+    /** Bring the store within both caps, atomically inside the store monitor (best-effort, spec §6.4). */
     private void enforceCaps() {
         try {
-            long rows = store.rowCount();
-            int overRows = (int) Math.min(Integer.MAX_VALUE, Math.max(0, rows - config.maxRows()));
-            if (overRows > 0) {
-                store.evictOldest(overRows);
-            }
-            // Byte cap: evict oldest in small batches until under the byte budget (or empty).
-            while (store.totalBodyBytes() > config.maxBytes() && store.rowCount() > 0) {
-                int deleted = store.evictOldest(Math.max(1, (int) Math.min(64, store.rowCount())));
-                if (deleted == 0) {
-                    break;
-                }
-            }
+            // Delegate to the store so the check-and-evict happens under one lock; doing it here across
+            // separate rowCount()/totalBodyBytes()/evictOldest() calls let concurrent writers each see
+            // the same overage and over-evict (N x the surplus) under the virtual-thread executor.
+            store.enforceCaps(config.maxRows(), config.maxBytes());
         } catch (SQLException ex) {
             recordError("L2 eviction", "(cap)", ex);
         }
@@ -279,10 +271,12 @@ public final class L2CachingGateway implements AutoCloseable {
         if (!PARSED_VERSION.matcher(body).find()) {
             return false;
         }
-        // Corroborating signal: any one of these only appears on parsed matches.
+        // Corroborating signal: any one of these only appears (non-null) on parsed matches. All three
+        // use the non-null check — a bare contains() would wrongly accept "purchase_log":null on an
+        // otherwise-unparsed body and pin it PERMANENT forever.
         return hasNonNullKey(body, "od_data")
                 || hasNonNullKey(body, "objectives")
-                || body.contains("\"purchase_log\"");
+                || hasNonNullKey(body, "purchase_log");
     }
 
     /**
@@ -348,6 +342,15 @@ public final class L2CachingGateway implements AutoCloseable {
             return Classification.TTL;
         }
         if (p.startsWith("/search")) {
+            return Classification.TTL;
+        }
+        // Rolling aggregates over recent matches / a drifting player-base histogram — volatile, so
+        // TTL (not durably pinned), matching the /heroes/{id}/* treatment. Classified explicitly
+        // rather than via the NO_STORE default so they aren't mistaken for uncacheable like /live.
+        if (p.startsWith("/benchmarks")) {
+            return Classification.TTL;
+        }
+        if (p.startsWith("/distributions")) {
             return Classification.TTL;
         }
         // /live and everything unrecognised — NO_STORE.

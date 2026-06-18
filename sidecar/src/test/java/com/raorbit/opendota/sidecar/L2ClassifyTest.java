@@ -43,10 +43,11 @@ class L2ClassifyTest {
             "/rankings,                            TTL",
             "/search,                              TTL",
             "/search?q=dendi,                      TTL",
+            // rolling aggregates / drifting histogram -> TTL (volatile, not durably pinned)
+            "/benchmarks?hero_id=14,               TTL",
+            "/distributions,                       TTL",
             // live + unrecognised -> NO_STORE
             "/live,                                NO_STORE",
-            "/distributions,                       NO_STORE",
-            "/benchmarks,                          NO_STORE",
             "/totally-unknown,                     NO_STORE",
             "/,                                    NO_STORE"
     })
@@ -78,6 +79,9 @@ class L2ClassifyTest {
         assertThat(L2CachingGateway.isParsedMatch("{\"match_id\":1,\"radiant_win\":true}")).isFalse();
         // version present but NO corroborating field -> not confidently parsed (defence in depth).
         assertThat(L2CachingGateway.isParsedMatch("{\"match_id\":1,\"version\":21}")).isFalse();
+        // version present but the only corroborator is explicitly null -> NOT parsed (purchase_log
+        // must be non-null, like the other corroborators; a bare contains() would wrongly accept this).
+        assertThat(L2CachingGateway.isParsedMatch("{\"version\":21,\"purchase_log\":null}")).isFalse();
         // null body.
         assertThat(L2CachingGateway.isParsedMatch(null)).isFalse();
     }

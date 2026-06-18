@@ -285,6 +285,30 @@ public final class L2Store implements AutoCloseable {
     }
 
     /**
+     * Bring the table within both the row-count and byte caps, evicting oldest-first, all under this
+     * store's monitor so the check and the eviction are atomic — concurrent callers can't each read
+     * the same overage and over-evict (N x the surplus). Best-effort (spec §6.4).
+     *
+     * @return the total number of rows evicted
+     */
+    public synchronized int enforceCaps(long maxRows, long maxBytes) throws SQLException {
+        int total = 0;
+        long overRows = currentRows.get() - maxRows;
+        if (overRows > 0) {
+            total += evictOldest((int) Math.min(Integer.MAX_VALUE, overRows));
+        }
+        // Byte cap: evict oldest in small batches until under the byte budget (or empty).
+        while (currentBytes.get() > maxBytes && currentRows.get() > 0) {
+            int deleted = evictOldest((int) Math.max(1L, Math.min(64L, currentRows.get())));
+            if (deleted == 0) {
+                break;
+            }
+            total += deleted;
+        }
+        return total;
+    }
+
+    /**
      * Patch-bust (spec §5.2): delete every PERMANENT row whose {@code patch_id IS NOT NULL} (the
      * patch-scoped static rows). Match rows have {@code patch_id = NULL} and survive.
      *
