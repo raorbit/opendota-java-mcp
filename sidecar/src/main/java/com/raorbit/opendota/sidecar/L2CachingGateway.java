@@ -133,6 +133,13 @@ public final class L2CachingGateway implements AutoCloseable {
         if (body == null) {
             return;
         }
+        if (patchScoped && currentPatchId == null) {
+            // The patch id is unknown (a transient patch-check failure). Storing a patch-scoped row
+            // with patch_id=NULL would make it survive every future patchBust() (which spares NULL
+            // match rows) AND the per-row stale guard (which skips NULL patch_ids) — permanent stale
+            // data. Skip the store; the next request re-fetches once the patch id resolves.
+            return;
+        }
         boolean isMatch = MATCH_ID.matcher(stripQuery(path)).matches();
         if (isMatch && !isParsedMatch(body)) {
             // Unparsed match: do NOT store permanently — re-fetch next time (spec §5.1).
