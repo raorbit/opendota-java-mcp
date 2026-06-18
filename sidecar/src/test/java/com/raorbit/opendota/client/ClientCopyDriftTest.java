@@ -24,8 +24,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * build if any copy diverges from its canonical source.
  *
  * <p><strong>To sync:</strong> edit the canonical file under the root
- * {@code src/main/.../client/}, then copy it verbatim over the sidecar copy here so this
- * guard passes again.
+ * {@code src/main/.../client/} (the single source of truth), then run
+ * {@code scripts/sync-client-copies.sh} (or {@code .ps1}) to mirror it into the sidecar so this
+ * guard passes again, and commit both.
  *
  * <p>When the root tree is not present beside the sidecar module (e.g. the sidecar built
  * in isolation from a distributed source tarball), the check is skipped <em>locally</em> —
