@@ -324,6 +324,69 @@ class OpenDotaClientTest {
     }
 
     @Test
+    void configuredPermitsPerMinuteThrottlesOutbound() throws Exception {
+        // A configured permits/min budget (here 1) must be honored, not the tier
+        // default of 60 keyless. /live is no-store, so each call reaches the limiter;
+        // the first consumes the only permit and the second (non-blocking budget)
+        // fails fast with a client-side 429.
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/live", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 200, "[]");
+        });
+
+        OpenDotaClient client =
+                new OpenDotaClient(null, base, 4096, 64L * 1024 * 1024, Duration.ZERO, 16L * 1024 * 1024, 1);
+
+        assertThat(client.getJson("/live")).isEqualTo("[]");
+        assertThatThrownBy(() -> client.getJson("/live"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(429));
+        assertThat(hits.get()).isEqualTo(1);
+    }
+
+    @Test
+    void forwardingClientBypassesLocalCache() throws Exception {
+        // A forwarding client (pointed at the sidecar) must NOT cache: the sidecar owns
+        // the shared cache. /players/* is cacheable for a direct client, so two identical
+        // calls hitting upstream twice proves the local cache is bypassed when forwarding.
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/players/123", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 200, "{\"profile\":{\"account_id\":123}}");
+        });
+
+        OpenDotaClient client = OpenDotaClient.forwardingTo(base, 16L * 1024 * 1024);
+
+        client.getJson("/players/123");
+        client.getJson("/players/123");
+
+        assertThat(hits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void forwardingClientDoesNotAppendApiKey() throws Exception {
+        // A forwarding client holds no key (the sidecar does), so it must never append one.
+        stub("/api/heroes", 200, "[]");
+
+        OpenDotaClient client = OpenDotaClient.forwardingTo(base, 16L * 1024 * 1024);
+
+        assertThat(client.isKeyed()).isFalse();
+        client.getJson("/heroes");
+
+        assertThat(received).hasSize(1);
+        assertThat(received.get(0)).doesNotContain("api_key");
+    }
+
+    @Test
+    void negativePermitsPerMinuteIsRejected() {
+        // 0 means "tier default"; a negative value is a config typo and fails fast.
+        assertThatThrownBy(
+                () -> new OpenDotaClient(null, base, 4096, 64L * 1024 * 1024, Duration.ofSeconds(10), 1024L, -1))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void errorBodyApiKeyIsRedactedAndTruncatedInEnvelope() {
         // A hostile/echoing upstream returns a 500 whose body contains the inbound
         // api_key and is longer than the 512-char snippet bound.

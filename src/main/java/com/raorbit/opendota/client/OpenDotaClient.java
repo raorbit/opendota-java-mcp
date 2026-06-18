@@ -2,6 +2,7 @@ package com.raorbit.opendota.client;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -53,6 +54,14 @@ public class OpenDotaClient implements AutoCloseable {
     private static final long MAX_RESPONSE_BYTES_CEILING = 256L * 1024 * 1024;
     /** Maximum length of an upstream error body surfaced in the error envelope. */
     private static final int MAX_UPSTREAM_SNIPPET = 512;
+    /** Permits/min sentinel: {@code 0} = derive from the tier (300 keyed / 60 keyless). */
+    private static final int DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE = 0;
+    /** Total time a forwarding client retries a refused sidecar connection before giving up. */
+    private static final Duration SIDECAR_RETRY_BUDGET = Duration.ofSeconds(30);
+    /** Initial backoff between sidecar connection retries (doubles up to the cap). */
+    private static final Duration SIDECAR_RETRY_BASE_BACKOFF = Duration.ofMillis(200);
+    /** Maximum backoff between sidecar connection retries. */
+    private static final Duration SIDECAR_RETRY_MAX_BACKOFF = Duration.ofSeconds(2);
 
     private final String apiKey;
     private final boolean keyed;
@@ -74,21 +83,44 @@ public class OpenDotaClient implements AutoCloseable {
     private final Duration rateLimitBudget;
     /** In-flight cacheable fetches, so concurrent identical requests share one call. */
     private final ConcurrentHashMap<String, CompletableFuture<String>> inFlight = new ConcurrentHashMap<>();
+    /**
+     * When true, this client is a thin forwarder to a local sidecar that owns the
+     * shared cache, single-flight and rate limiter, so it bypasses all three and
+     * retries briefly on a refused connection (the sidecar may still be starting).
+     */
+    private final boolean forwarding;
 
     public OpenDotaClient(String apiKey) {
         this(apiKey, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
-                DEFAULT_RATE_LIMIT_BUDGET, DEFAULT_MAX_RESPONSE_BYTES);
+                DEFAULT_RATE_LIMIT_BUDGET, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE);
     }
 
     /**
-     * @param cacheMaxEntries  maximum cached responses retained before eviction
-     * @param cacheMaxBytes    approximate maximum total bytes of cached bodies
-     * @param rateLimitBudget  maximum wait for a rate-limit permit before failing fast
-     * @param maxResponseBytes maximum size of a single upstream response body
+     * @param cacheMaxEntries           maximum cached responses retained before eviction
+     * @param cacheMaxBytes             approximate maximum total bytes of cached bodies
+     * @param rateLimitBudget           maximum wait for a rate-limit permit before failing fast
+     * @param maxResponseBytes          maximum size of a single upstream response body
+     * @param rateLimitPermitsPerMinute outbound permits/min for the limiter, or {@code 0} to use
+     *                                  the tier default (300 keyed / 60 keyless)
      */
     public OpenDotaClient(String apiKey, int cacheMaxEntries, long cacheMaxBytes,
-                          Duration rateLimitBudget, long maxResponseBytes) {
-        this(apiKey, DEFAULT_BASE, cacheMaxEntries, cacheMaxBytes, rateLimitBudget, maxResponseBytes);
+                          Duration rateLimitBudget, long maxResponseBytes, int rateLimitPermitsPerMinute) {
+        this(apiKey, DEFAULT_BASE, cacheMaxEntries, cacheMaxBytes, rateLimitBudget, maxResponseBytes,
+                rateLimitPermitsPerMinute);
+    }
+
+    /**
+     * Create a forwarding client that proxies every GET to a sidecar base URL
+     * (e.g. {@code http://127.0.0.1:31337/api}), bypassing the local cache,
+     * single-flight and rate limiter — the sidecar owns those and holds the API
+     * key. Brief connection retries cover a sidecar that is still starting up.
+     *
+     * @param baseUrl          the sidecar base URL (its path space mirrors OpenDota's)
+     * @param maxResponseBytes inbound response-size cap, guarding against a misbehaving sidecar
+     */
+    public static OpenDotaClient forwardingTo(String baseUrl, long maxResponseBytes) {
+        return new OpenDotaClient(null, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
+                DEFAULT_RATE_LIMIT_BUDGET, maxResponseBytes, DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE, true);
     }
 
     /**
@@ -98,17 +130,24 @@ public class OpenDotaClient implements AutoCloseable {
      */
     OpenDotaClient(String apiKey, String baseUrl) {
         this(apiKey, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
-                DEFAULT_RATE_LIMIT_BUDGET, DEFAULT_MAX_RESPONSE_BYTES);
+                DEFAULT_RATE_LIMIT_BUDGET, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE);
     }
 
     /** Package-private constructor for tests that need to override the response-size cap. */
     OpenDotaClient(String apiKey, String baseUrl, long maxResponseBytes) {
         this(apiKey, baseUrl, DEFAULT_CACHE_MAX_ENTRIES, DEFAULT_CACHE_MAX_BYTES,
-                DEFAULT_RATE_LIMIT_BUDGET, maxResponseBytes);
+                DEFAULT_RATE_LIMIT_BUDGET, maxResponseBytes, DEFAULT_RATE_LIMIT_PERMITS_PER_MINUTE);
     }
 
     OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, long cacheMaxBytes,
-                   Duration rateLimitBudget, long maxResponseBytes) {
+                   Duration rateLimitBudget, long maxResponseBytes, int rateLimitPermitsPerMinute) {
+        this(apiKey, baseUrl, cacheMaxEntries, cacheMaxBytes, rateLimitBudget, maxResponseBytes,
+                rateLimitPermitsPerMinute, false);
+    }
+
+    private OpenDotaClient(String apiKey, String baseUrl, int cacheMaxEntries, long cacheMaxBytes,
+                           Duration rateLimitBudget, long maxResponseBytes, int rateLimitPermitsPerMinute,
+                           boolean forwarding) {
         String trimmed = apiKey == null ? null : apiKey.trim();
         if (trimmed != null && trimmed.isEmpty()) {
             trimmed = null;
@@ -130,13 +169,22 @@ public class OpenDotaClient implements AutoCloseable {
             throw new IllegalArgumentException(
                     "maxResponseBytes must not exceed " + MAX_RESPONSE_BYTES_CEILING + ": " + maxResponseBytes);
         }
+        if (rateLimitPermitsPerMinute < 0) {
+            throw new IllegalArgumentException(
+                    "rateLimitPermitsPerMinute must not be negative (0 = tier default): " + rateLimitPermitsPerMinute);
+        }
         this.rateLimitBudget = rateLimitBudget;
         this.maxResponseBytes = maxResponseBytes;
         this.cache = new TtlCache(cacheMaxEntries, cacheMaxBytes);
-        this.rateLimiter = new RateLimiter(keyed ? 300 : 60);
+        // 0 means "derive from the tier"; an explicit positive value lets co-running
+        // processes that share one API key split the real per-key budget so their
+        // combined outbound rate stays within OpenDota's ceiling.
+        int permits = rateLimitPermitsPerMinute > 0 ? rateLimitPermitsPerMinute : (keyed ? 300 : 60);
+        this.rateLimiter = new RateLimiter(permits);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(CONNECT_TIMEOUT)
                 .build();
+        this.forwarding = forwarding;
     }
 
     /**
@@ -148,6 +196,11 @@ public class OpenDotaClient implements AutoCloseable {
      * @throws OpenDotaException on any HTTP error or transport failure
      */
     public String getJson(String path) throws OpenDotaException {
+        if (forwarding) {
+            // The sidecar owns caching, single-flight and rate limiting; just forward
+            // the GET (with brief connection retries) and return its response verbatim.
+            return fetch(path, path, Duration.ZERO, false);
+        }
         Duration ttl = ttlFor(path);
         // Cache key is the path BEFORE any api_key is appended.
         String cacheKey = path;
@@ -208,16 +261,20 @@ public class OpenDotaClient implements AutoCloseable {
 
     /** Perform the rate-limited HTTP GET, caching a 2xx body when {@code cacheable}. */
     private String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
-        boolean acquired;
-        try {
-            acquired = rateLimiter.tryAcquire(rateLimitBudget);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new OpenDotaException(0, path, "request interrupted", ie);
-        }
-        if (!acquired) {
-            throw new OpenDotaException(429, path,
-                    "client-side rate limit: no permit within " + rateLimitBudget.toSeconds() + "s");
+        // A forwarding client delegates rate limiting to the sidecar, so it must not
+        // consume a local permit (its own limiter would wrongly throttle the loopback hop).
+        if (!forwarding) {
+            boolean acquired;
+            try {
+                acquired = rateLimiter.tryAcquire(rateLimitBudget);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new OpenDotaException(0, path, "request interrupted", ie);
+            }
+            if (!acquired) {
+                throw new OpenDotaException(429, path,
+                        "client-side rate limit: no permit within " + rateLimitBudget.toSeconds() + "s");
+            }
         }
 
         String url = base + path;
@@ -239,8 +296,7 @@ public class OpenDotaClient implements AutoCloseable {
             // hostile/oversized upstream body cannot exhaust the heap. The body is
             // still delivered through the client's subscriber pipeline, so the
             // request timeout continues to bound delivery.
-            HttpResponse<String> response =
-                    httpClient.send(request, info -> new CappedBodySubscriber(maxResponseBytes));
+            HttpResponse<String> response = send(request);
             int status = response.statusCode();
             String body = response.body();
             if (status >= 200 && status <= 299) {
@@ -268,6 +324,33 @@ public class OpenDotaClient implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new OpenDotaException(0, path, "request interrupted", e);
+        }
+    }
+
+    /**
+     * Send the request through the shared client. A forwarding client retries a
+     * <em>refused</em> connection (the sidecar may still be binding its port) within
+     * {@link #SIDECAR_RETRY_BUDGET}, backing off exponentially; once the budget is
+     * spent the {@link ConnectException} propagates and maps to a transport error.
+     * Non-forwarding clients send exactly once.
+     */
+    private HttpResponse<String> send(HttpRequest request) throws IOException, InterruptedException {
+        if (!forwarding) {
+            return httpClient.send(request, info -> new CappedBodySubscriber(maxResponseBytes));
+        }
+        long deadlineNanos = System.nanoTime() + SIDECAR_RETRY_BUDGET.toNanos();
+        long backoffMillis = SIDECAR_RETRY_BASE_BACKOFF.toMillis();
+        while (true) {
+            try {
+                return httpClient.send(request, info -> new CappedBodySubscriber(maxResponseBytes));
+            } catch (ConnectException ce) {
+                long remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+                if (remainingMillis <= 0L) {
+                    throw ce;
+                }
+                Thread.sleep(Math.min(backoffMillis, remainingMillis));
+                backoffMillis = Math.min(backoffMillis * 2, SIDECAR_RETRY_MAX_BACKOFF.toMillis());
+            }
         }
     }
 

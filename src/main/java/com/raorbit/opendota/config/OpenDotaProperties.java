@@ -29,6 +29,30 @@ public class OpenDotaProperties {
      */
     private long maxResponseBytes = 16L * 1024 * 1024;
 
+    /**
+     * Outbound rate-limit permits per minute, or {@code 0} to derive from the API
+     * tier (300 keyed / 60 keyless). When several MCP server processes share one
+     * API key (and so one OpenDota per-key budget), set this to
+     * {@code tier_budget / expected_concurrent_processes} so their combined
+     * outbound rate stays within OpenDota's real per-key ceiling. Made obsolete
+     * once the requests are funnelled through a single shared sidecar.
+     */
+    private int rateLimitPermitsPerMinute = 0;
+
+    /**
+     * When {@code true}, this server forwards every OpenDota call to a shared local
+     * sidecar (which holds the API key and owns the one rate limiter and cache)
+     * instead of calling OpenDota directly. Use this when several agents share one
+     * API key; see {@code docs/mcp-registration.md}. Default {@code false} = direct.
+     */
+    private boolean sidecarEnabled = false;
+
+    /** Loopback host of the shared sidecar (used only when {@link #sidecarEnabled}). */
+    private String sidecarHost = "127.0.0.1";
+
+    /** Port of the shared sidecar (used only when {@link #sidecarEnabled}). */
+    private int sidecarPort = 31337;
+
     public int getCacheMaxEntries() {
         return cacheMaxEntries;
     }
@@ -59,5 +83,37 @@ public class OpenDotaProperties {
 
     public void setMaxResponseBytes(long maxResponseBytes) {
         this.maxResponseBytes = maxResponseBytes;
+    }
+
+    public int getRateLimitPermitsPerMinute() {
+        return rateLimitPermitsPerMinute;
+    }
+
+    public void setRateLimitPermitsPerMinute(int rateLimitPermitsPerMinute) {
+        this.rateLimitPermitsPerMinute = rateLimitPermitsPerMinute;
+    }
+
+    public boolean isSidecarEnabled() {
+        return sidecarEnabled;
+    }
+
+    public void setSidecarEnabled(boolean sidecarEnabled) {
+        this.sidecarEnabled = sidecarEnabled;
+    }
+
+    public String getSidecarHost() {
+        return sidecarHost;
+    }
+
+    public void setSidecarHost(String sidecarHost) {
+        this.sidecarHost = sidecarHost;
+    }
+
+    public int getSidecarPort() {
+        return sidecarPort;
+    }
+
+    public void setSidecarPort(int sidecarPort) {
+        this.sidecarPort = sidecarPort;
     }
 }
