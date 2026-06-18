@@ -185,14 +185,19 @@ public final class L2CachingGateway implements AutoCloseable {
             try {
                 String observed = observeCurrentPatch();
                 String stored = store.storedPatchId();
-                if (observed != null && !observed.equals(stored)) {
-                    int deleted = store.patchBust();
-                    store.storePatchId(observed);
-                    if (deleted > 0) {
-                        l2PatchBust.incrementAndGet();
+                if (observed != null) {
+                    if (!observed.equals(stored)) {
+                        int deleted = store.patchBust();
+                        store.storePatchId(observed);
+                        if (deleted > 0) {
+                            l2PatchBust.incrementAndGet();
+                        }
                     }
+                    // Only record the timestamp on a successful observe. A transient failure
+                    // (observed == null) must leave the timer untouched so the next request
+                    // retries, rather than suppressing checks for the full patchCheckMillis window.
+                    lastPatchCheckMillis = now;
                 }
-                lastPatchCheckMillis = now;
                 return observed != null ? observed : stored;
             } catch (SQLException ex) {
                 recordError("L2 patch check", "/constants/patch", ex);
