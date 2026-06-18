@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  root:
+    name: Root module (opendota-mcp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and test
+        run: mvn -B clean verify
+
+  sidecar:
+    name: Sidecar module (opendota-sidecar)
+    runs-on: ubuntu-latest
+    # CI=true makes the client-copy drift guard (ClientCopyDriftTest) fail hard
+    # instead of skipping. The drift test resolves the repo root as the sidecar
+    # module's parent, so the build is run from the repo root with -f sidecar/pom.xml
+    # (not from inside the module), keeping the root tree present.
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and test
+        run: mvn -B -f sidecar/pom.xml clean verify
+
+  dependency-updates:
+    name: Dependency updates (informational)
+    runs-on: ubuntu-latest
+    # Visibility only: the stack is deliberately locked. This must never bump a
+    # dependency or fail the build, hence continue-on-error.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Report root dependency updates
+        run: mvn -B versions:display-dependency-updates
+      - name: Report sidecar dependency updates
+        run: mvn -B -f sidecar/pom.xml versions:display-dependency-updates
