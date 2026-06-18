@@ -11,8 +11,9 @@ import java.util.logging.Logger;
  * Entry point for the shared OpenDota sidecar.
  *
  * <p>Reads the optional {@code OPENDOTA_API_KEY} (held here so the agent processes
- * never need it) and a port — system property {@code opendota.sidecar.port}, else
- * env {@code OPENDOTA_SIDECAR_PORT}, else {@value #DEFAULT_PORT} — then starts the
+ * never need it) and a port — system property {@code opendota.sidecar.port} (or the
+ * dashed {@code opendota.sidecar-port} the agent's Spring property uses), else env
+ * {@code OPENDOTA_SIDECAR_PORT}, else {@value #DEFAULT_PORT} — then starts the
  * loopback HTTP server and blocks until the JVM is shut down.
  *
  * <p>Run it once per machine before launching the agents:
@@ -59,16 +60,31 @@ public final class SidecarMain {
         new CountDownLatch(1).await();
     }
 
-    private static int resolvePort() {
-        String raw = System.getProperty("opendota.sidecar.port", System.getenv("OPENDOTA_SIDECAR_PORT"));
+    /**
+     * Resolve the port to bind. Precedence: system property {@code opendota.sidecar.port},
+     * then {@code opendota.sidecar-port} (the dashed spelling the agent's Spring property
+     * uses — accepted here too so the two sides can't be silently mismatched by separator),
+     * then env {@code OPENDOTA_SIDECAR_PORT}, else {@value #DEFAULT_PORT}. A non-numeric or
+     * out-of-range value logs a warning and falls back to the default rather than crashing.
+     */
+    static int resolvePort() {
+        String raw = System.getProperty("opendota.sidecar.port",
+                System.getProperty("opendota.sidecar-port", System.getenv("OPENDOTA_SIDECAR_PORT")));
         if (raw == null || raw.isBlank()) {
             return DEFAULT_PORT;
         }
+        String value = raw.trim();
+        int port;
         try {
-            return Integer.parseInt(raw.trim());
+            port = Integer.parseInt(value);
         } catch (NumberFormatException e) {
-            LOG.warning(() -> "invalid sidecar port '" + raw + "', using default " + DEFAULT_PORT);
+            LOG.warning(() -> "invalid sidecar port '" + value + "', using default " + DEFAULT_PORT);
             return DEFAULT_PORT;
         }
+        if (port < 1 || port > 65535) {
+            LOG.warning(() -> "sidecar port " + value + " out of range 1-65535, using default " + DEFAULT_PORT);
+            return DEFAULT_PORT;
+        }
+        return port;
     }
 }
