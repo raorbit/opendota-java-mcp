@@ -37,7 +37,7 @@ public final class L2CachingGateway implements AutoCloseable {
      * Parse-gate primary signal (spec §5.1): a top-level {@code "version"} key whose value is a
      * (non-null) number. {@code null} or absent ⇒ unparsed.
      */
-    private static final Pattern PARSED_VERSION = Pattern.compile("\"version\"\\s*:\\s*-?\\d");
+    private static final Pattern PARSED_VERSION = Pattern.compile("\"version\"\\s*:\\s*\\d");
     /** Latest-patch probe for {@code /constants/patch}: numeric {@code "id"} values (dep-free, not a parse). */
     private static final Pattern PATCH_ID_NUM = Pattern.compile("\"id\"\\s*:\\s*(\\d+)");
     /** Precompiled corroborating parse-field probes (the matched key's value must be non-null). */
