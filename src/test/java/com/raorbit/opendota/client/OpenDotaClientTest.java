@@ -8,7 +8,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -376,6 +378,77 @@ class OpenDotaClientTest {
 
         assertThat(received).hasSize(1);
         assertThat(received.get(0)).doesNotContain("api_key");
+    }
+
+    /** Reserve then release a loopback port, returning a port number nothing is listening on. */
+    private static int freeLoopbackPort() throws IOException {
+        try (ServerSocket s = new ServerSocket(0, 0, InetAddress.getLoopbackAddress())) {
+            return s.getLocalPort();
+        }
+    }
+
+    @Test
+    void forwardingClientRetriesARefusedConnectionThenSucceeds() throws Exception {
+        // The forwarding client retries a refused sidecar connection while the sidecar is
+        // still binding its port. Leave a free port closed, then bind a server on it shortly
+        // after the call starts; the retry loop should connect once it is up.
+        int port = freeLoopbackPort();
+        OpenDotaClient client = OpenDotaClient.forwardingTo("http://127.0.0.1:" + port + "/api", 16L * 1024 * 1024);
+
+        HttpServer[] late = new HttpServer[1];
+        Thread binder = new Thread(() -> {
+            try {
+                Thread.sleep(300);   // refused for a moment, then comes up — within the retry budget
+                HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+                s.createContext("/api/heroes", exchange -> respond(exchange, 200, "[]"));
+                s.start();
+                late[0] = s;
+            } catch (IOException | InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        binder.start();
+        try {
+            assertThat(client.getJson("/heroes")).isEqualTo("[]");
+        } finally {
+            binder.join(2000);
+            if (late[0] != null) {
+                late[0].stop(0);
+            }
+        }
+    }
+
+    @Test
+    void forwardingClientFailsCleanlyWhenSidecarNeverComesUp() throws Exception {
+        // With no sidecar listening, the forwarding client exhausts its retry budget and
+        // surfaces a clean transport-level (status 0) error instead of hanging indefinitely.
+        int port = freeLoopbackPort();
+        OpenDotaClient client = OpenDotaClient.forwardingTo("http://127.0.0.1:" + port + "/api", 16L * 1024 * 1024);
+
+        long startNanos = System.nanoTime();
+        assertThatThrownBy(() -> client.getJson("/heroes"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(0));
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        // Must fail fast-ish — nowhere near the original 30s budget.
+        assertThat(elapsedMs).isLessThan(20_000L);
+    }
+
+    @Test
+    void forwardingClientEnforcesResponseSizeCap() {
+        // forwardingTo documents maxResponseBytes as a guard against a misbehaving sidecar;
+        // an oversized body on the forwarding path must abort just like the direct path.
+        stub("/api/heroes", 200, "x".repeat(4096));
+
+        OpenDotaClient client = OpenDotaClient.forwardingTo(base, 1024);
+
+        assertThatThrownBy(() -> client.getJson("/heroes"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> {
+                    OpenDotaException e = (OpenDotaException) t;
+                    assertThat(e.statusCode()).isEqualTo(0);
+                    assertThat(e.responseBody()).contains("exceeded").contains("cap");
+                });
     }
 
     @Test
