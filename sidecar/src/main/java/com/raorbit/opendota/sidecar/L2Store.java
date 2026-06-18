@@ -36,6 +36,14 @@ public final class L2Store implements AutoCloseable {
     private static final String META_PATCH_ID = "patch_id";
 
     private final Connection conn;
+    /**
+     * A separate read-only connection for the hot {@link #get} path, so an L2-hit read isn't serialized
+     * behind a concurrent write (WAL lets a reader proceed while {@link #conn} writes). For an in-memory
+     * db — where a second connection would be a private, empty db — this is the same object as {@code conn}.
+     */
+    private Connection readConn;
+    /** Guards {@link #readConn}; equals {@code this} when readConn == conn so reads still serialize with writes. */
+    private Object readLock;
 
     // O(1) running totals so enforceCaps() avoids full-table COUNT/SUM scans on the request path
     // (spec §6.4). Seeded once on open, then maintained by put/evictOldest/patchBust under the
@@ -53,11 +61,22 @@ public final class L2Store implements AutoCloseable {
      */
     public L2Store(Path dbPath, int schemaVersion) throws SQLException {
         String url = toJdbcUrl(dbPath);
+        boolean inMemory = ":memory:".equals(dbPath.toString());
         this.conn = DriverManager.getConnection(url);
         try {
             applyPragmas();
             migrate(schemaVersion);
             initCounters();
+            if (inMemory) {
+                // A second :memory: connection is a separate empty db, so share the one connection;
+                // reads then serialize with writes (readLock == this), which is correct for one db.
+                this.readConn = this.conn;
+                this.readLock = this;
+            } else {
+                this.readConn = DriverManager.getConnection(url);
+                applyReadPragmas();
+                this.readLock = new Object();
+            }
         } catch (SQLException e) {
             closeQuietly();
             throw e;
@@ -86,6 +105,14 @@ public final class L2Store implements AutoCloseable {
             st.execute("PRAGMA busy_timeout = 5000");
             st.execute("PRAGMA synchronous = NORMAL");
             st.execute("PRAGMA foreign_keys = ON");
+        }
+    }
+
+    /** Read connection: a busy_timeout for brief WAL contention and query_only as a defensive guard. */
+    private void applyReadPragmas() throws SQLException {
+        try (Statement st = readConn.createStatement()) {
+            st.execute("PRAGMA busy_timeout = 5000");
+            st.execute("PRAGMA query_only = true");
         }
     }
 
@@ -175,25 +202,29 @@ public final class L2Store implements AutoCloseable {
     }
 
     /** Read the row for {@code path}, or {@code null} if absent. Caller applies validity predicates. */
-    public synchronized Entry get(String path) throws SQLException {
-        String sql = "SELECT path, body, classification, stored_at, expires_at, schema_version, patch_id "
-                + "FROM cache_entries WHERE path = ?";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, path);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) {
-                    return null;
+    public Entry get(String path) throws SQLException {
+        // Reads use a dedicated connection under readLock (not the write monitor), so an L2-hit isn't
+        // blocked behind a concurrent write; WAL lets the reader see the latest committed snapshot.
+        synchronized (readLock) {
+            String sql = "SELECT path, body, classification, stored_at, expires_at, schema_version, patch_id "
+                    + "FROM cache_entries WHERE path = ?";
+            try (PreparedStatement ps = readConn.prepareStatement(sql)) {
+                ps.setString(1, path);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        return null;
+                    }
+                    long expires = rs.getLong("expires_at");
+                    Long expiresAt = rs.wasNull() ? null : expires;
+                    return new Entry(
+                            rs.getString("path"),
+                            rs.getString("body"),
+                            rs.getString("classification"),
+                            rs.getLong("stored_at"),
+                            expiresAt,
+                            rs.getInt("schema_version"),
+                            rs.getString("patch_id"));
                 }
-                long expires = rs.getLong("expires_at");
-                Long expiresAt = rs.wasNull() ? null : expires;
-                return new Entry(
-                        rs.getString("path"),
-                        rs.getString("body"),
-                        rs.getString("classification"),
-                        rs.getLong("stored_at"),
-                        expiresAt,
-                        rs.getInt("schema_version"),
-                        rs.getString("patch_id"));
             }
         }
     }
@@ -379,9 +410,17 @@ public final class L2Store implements AutoCloseable {
     }
 
     private void closeQuietly() {
+        // Close the read connection too, unless it is the same object as the write connection (in-memory).
+        if (readConn != null && readConn != conn) {
+            closeOne(readConn);
+        }
+        closeOne(conn);
+    }
+
+    private static void closeOne(Connection c) {
         try {
-            if (conn != null && !conn.isClosed()) {
-                conn.close();
+            if (c != null && !c.isClosed()) {
+                c.close();
             }
         } catch (SQLException ignored) {
             // best-effort close
