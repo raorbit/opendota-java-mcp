@@ -52,14 +52,18 @@ public final class SidecarMain {
         } catch (BindException e) {
             // Most likely a sidecar is already running on this port (the design is one shared
             // process per machine). Fail fast with an actionable message, not a raw stack trace.
-            if (gateway != null) {
-                gateway.close();
-            } else {
-                client.close();
-            }
+            closeQuietly(gateway, client);
             LOG.severe("cannot bind 127.0.0.1:" + port + " (" + e.getMessage() + ") — is a sidecar "
                     + "already running, or the port already in use? Stop the other process or pick "
                     + "another port via OPENDOTA_SIDECAR_PORT / -Dopendota.sidecar.port.");
+            System.exit(1);
+            return;   // unreachable after exit; keeps 'server' definitely assigned for the compiler
+        } catch (IOException e) {
+            // Any other failure to create the server: still close the gateway (and its SQLite
+            // store) / client rather than escaping main() and leaking them on the way out.
+            closeQuietly(gateway, client);
+            LOG.severe("cannot start HTTP server on 127.0.0.1:" + port + " ("
+                    + e.getClass().getSimpleName() + ": " + e.getMessage() + ").");
             System.exit(1);
             return;   // unreachable after exit; keeps 'server' definitely assigned for the compiler
         }
@@ -68,6 +72,15 @@ public final class SidecarMain {
         // Park the main thread so the process stays up as a long-lived service until
         // the JVM is signalled to stop (the shutdown hook then closes the server).
         new CountDownLatch(1).await();
+    }
+
+    /** Close the gateway (which closes the wrapped client) if present, else just the client. */
+    private static void closeQuietly(L2CachingGateway gateway, OpenDotaClient client) {
+        if (gateway != null) {
+            gateway.close();
+        } else {
+            client.close();
+        }
     }
 
     /**
