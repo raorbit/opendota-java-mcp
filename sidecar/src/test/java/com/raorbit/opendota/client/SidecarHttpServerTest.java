@@ -257,6 +257,28 @@ class SidecarHttpServerTest {
     }
 
     @Test
+    void statsReportsCacheAndLimiterCounters() throws Exception {
+        stubUpstream("/api/players/123", 200, "{\"profile\":{\"account_id\":123}}");
+
+        // First call misses the L1 cache and fetches; the second is served from cache (a hit).
+        get("/api/players/123");
+        get("/api/players/123");
+
+        HttpResponse<String> stats = get("/stats");
+        assertThat(stats.statusCode()).isEqualTo(200);
+        assertThat(stats.body())
+                .contains("\"cacheHits\":")
+                .contains("\"cacheMisses\":")
+                .contains("\"cacheEntries\":")
+                .contains("\"availablePermits\":")
+                // keyless tier default budget, and at least one cache hit from the repeat call.
+                .contains("\"permitsPerMinute\":60")
+                .contains("\"cacheHits\":1");
+        // One upstream fetch despite two identical calls (cache hit on the second).
+        assertThat(upstreamHits.get()).isEqualTo(1);
+    }
+
+    @Test
     void tokenGatedSidecarRequiresMatchingHeaderForApiButNotHealth() throws Exception {
         stubUpstream("/api/heroes", 200, "[]");
         try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "s3cret")) {

@@ -424,6 +424,21 @@ public class OpenDotaClient implements AutoCloseable {
         return keyed;
     }
 
+    /** An immutable snapshot of this client's cache and rate-limiter counters, for a stats endpoint. */
+    public record Stats(boolean keyed, long cacheHits, long cacheMisses, int cacheEntries,
+                        long cacheBytes, long availablePermits, int permitsPerMinute) {
+    }
+
+    /**
+     * Snapshot the cache hit/miss tallies and the rate limiter's available permits. Meaningful for
+     * a direct client (the sidecar's shared client); a forwarding client bypasses both, so its
+     * counters stay at zero.
+     */
+    public Stats stats() {
+        return new Stats(keyed, cache.hits(), cache.misses(), cache.size(), cache.approximateBytes(),
+                (long) Math.floor(rateLimiter.availablePermits()), rateLimiter.permitsPerMinute());
+    }
+
     /** URL-encode a query/path value using UTF-8. */
     public static String encode(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);

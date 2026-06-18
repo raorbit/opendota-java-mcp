@@ -33,6 +33,9 @@ public final class TtlCache {
     private final ConcurrentHashMap<String, Entry> map = new ConcurrentHashMap<>();
     /** Approximate running total of cached value sizes; a soft bound under concurrency. */
     private final AtomicLong currentBytes = new AtomicLong();
+    /** Lifetime read hits (live value returned) and misses (absent or expired), for observability. */
+    private final AtomicLong hits = new AtomicLong();
+    private final AtomicLong misses = new AtomicLong();
 
     public TtlCache() {
         this(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_BYTES);
@@ -64,14 +67,37 @@ public final class TtlCache {
         }
         Entry entry = map.get(key);
         if (entry == null) {
+            misses.incrementAndGet();
             return null;
         }
         if (System.nanoTime() - entry.expiresAtNanos >= 0L) {
             // Expired: evict (only if still the same entry) and report a miss.
             removeEntry(key, entry);
+            misses.incrementAndGet();
             return null;
         }
+        hits.incrementAndGet();
         return entry.value;
+    }
+
+    /** Lifetime count of read hits (a live value was returned). */
+    public long hits() {
+        return hits.get();
+    }
+
+    /** Lifetime count of read misses (key absent or expired on read). */
+    public long misses() {
+        return misses.get();
+    }
+
+    /** Current number of retained entries (including any not-yet-reclaimed expired ones). */
+    public int size() {
+        return map.size();
+    }
+
+    /** Approximate total bytes of cached values (a soft, eventually-consistent tally). */
+    public long approximateBytes() {
+        return currentBytes.get();
     }
 
     /**

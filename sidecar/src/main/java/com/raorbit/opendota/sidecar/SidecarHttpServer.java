@@ -65,6 +65,7 @@ public final class SidecarHttpServer implements AutoCloseable {
         this.token = (trimmed == null || trimmed.isEmpty()) ? null : trimmed;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         this.server.createContext("/health", this::handleHealth);
+        this.server.createContext("/stats", this::handleStats);
         this.server.createContext(API_PREFIX, this::handleApi);
         this.server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
@@ -86,6 +87,32 @@ public final class SidecarHttpServer implements AutoCloseable {
             return;
         }
         respond(exchange, 200, "{\"status\":\"ok\"}");
+    }
+
+    /**
+     * {@code GET /stats} — the shared client's cache/limiter counters as hand-rolled JSON, so an
+     * operator can see how close to the rate budget the sidecar is and whether the cache is earning
+     * its keep. Token-gated like {@code /api} when a secret is configured.
+     */
+    private void handleStats(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            respond(exchange, 405, "{\"error\":\"method not allowed\"}");
+            return;
+        }
+        if (!authorized(exchange)) {
+            respond(exchange, 401, "{\"error\":\"unauthorized\"}");
+            return;
+        }
+        OpenDotaClient.Stats s = client.stats();
+        String json = "{\"keyed\":" + s.keyed()
+                + ",\"cacheHits\":" + s.cacheHits()
+                + ",\"cacheMisses\":" + s.cacheMisses()
+                + ",\"cacheEntries\":" + s.cacheEntries()
+                + ",\"cacheBytes\":" + s.cacheBytes()
+                + ",\"availablePermits\":" + s.availablePermits()
+                + ",\"permitsPerMinute\":" + s.permitsPerMinute()
+                + "}";
+        respond(exchange, 200, json);
     }
 
     private void handleApi(HttpExchange exchange) throws IOException {

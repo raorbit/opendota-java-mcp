@@ -102,7 +102,8 @@ owns the single rate limiter and a shared cache, and have each server forward to
    OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.0.0.jar
    ```
    It binds `127.0.0.1:31337` (override with `OPENDOTA_SIDECAR_PORT` or
-   `-Dopendota.sidecar.port=<port>`) and serves `GET /health`. It is a plain HTTP process,
+   `-Dopendota.sidecar.port=<port>`) and serves `GET /health` (liveness) plus `GET /stats`
+   (cache hit/miss and rate-limiter counters). It is a plain HTTP process,
    not the stdio transport, so it logs to the console — redirect it to a file if you
    run it in the background.
 

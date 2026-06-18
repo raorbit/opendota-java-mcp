@@ -24,6 +24,21 @@ class TtlCacheTest {
     }
 
     @Test
+    void tracksHitAndMissCounts() {
+        TtlCache cache = new TtlCache();
+        cache.get("/absent");                                   // miss
+        cache.put("/heroes", "[1,2,3]", Duration.ofSeconds(30));
+        cache.get("/heroes");                                   // hit
+        cache.get("/heroes");                                   // hit
+        cache.get("/still-absent");                             // miss
+
+        assertThat(cache.hits()).isEqualTo(2);
+        assertThat(cache.misses()).isEqualTo(2);
+        assertThat(cache.size()).isEqualTo(1);
+        assertThat(cache.approximateBytes()).isGreaterThan(0L);
+    }
+
+    @Test
     void getReturnsNullAfterTtlElapses() throws InterruptedException {
         TtlCache cache = new TtlCache();
         cache.put("/heroes", "[1,2,3]", Duration.ofMillis(40));

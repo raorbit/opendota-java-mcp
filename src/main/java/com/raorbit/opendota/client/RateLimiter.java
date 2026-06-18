@@ -124,6 +124,19 @@ public final class RateLimiter {
         }
     }
 
+    /** A best-effort snapshot of currently-available permits (after a refill), for observability. */
+    public double availablePermits() {
+        synchronized (lock) {
+            refill();
+            return tokens;
+        }
+    }
+
+    /** The configured steady-state budget — the token-bucket capacity (permits per minute). */
+    public int permitsPerMinute() {
+        return (int) capacity;
+    }
+
     /** Must be called while holding {@link #lock}. */
     private void refill() {
         long now = System.nanoTime();
