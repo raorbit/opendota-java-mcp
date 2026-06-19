@@ -449,10 +449,9 @@ public class OpenDotaClient implements AutoCloseable {
      * stripped before prefix matching, and more-specific prefixes are checked
      * before more-general ones.
      *
-     * <p>Public because the sidecar's durable L2 gateway ({@code L2CachingGateway})
-     * reads it as the single source of truth for a TTL-class row's {@code expires_at}
-     * (it does not maintain a second copy of these horizons). Drift-guarded: edit only
-     * the root copy and mirror via {@code scripts/sync-client-copies.sh}.
+     * <p>Public so a co-located caller (the sidecar's durable cache) can reuse the resolved
+     * per-path horizon as a single source of truth rather than duplicating this table. Drift-guarded:
+     * edit only the root copy and mirror via {@code scripts/sync-client-copies.sh}.
      */
     public Duration ttlFor(String path) {
         if (path == null) {
