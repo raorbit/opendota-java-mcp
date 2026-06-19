@@ -62,9 +62,10 @@ class L2ClassifyTest {
 
     @Test
     void parseGateRecognisesParsedMatch() {
-        // version is a non-null number AND a corroborating parse field is present.
+        // version is a number AND a genuinely parse-only corroborator is present: od_data.has_parsed=true,
+        // a non-null objectives array, or a non-null purchase_log (the real shapes OpenDota emits when parsed).
         assertThat(L2CachingGateway.isParsedMatch(
-                "{\"match_id\":1,\"version\":21,\"od_data\":{\"x\":1}}")).isTrue();
+                "{\"match_id\":1,\"version\":21,\"od_data\":{\"has_parsed\":true}}")).isTrue();
         assertThat(L2CachingGateway.isParsedMatch(
                 "{\"version\":21,\"objectives\":[{\"type\":\"tower\"}]}")).isTrue();
         assertThat(L2CachingGateway.isParsedMatch(
@@ -80,8 +81,18 @@ class L2ClassifyTest {
         // version present but NO corroborating field -> not confidently parsed (defence in depth).
         assertThat(L2CachingGateway.isParsedMatch("{\"match_id\":1,\"version\":21}")).isFalse();
         // version present but the only corroborator is explicitly null -> NOT parsed (purchase_log
-        // must be non-null, like the other corroborators; a bare contains() would wrongly accept this).
+        // must be non-null; a bare contains() would wrongly accept this).
         assertThat(L2CachingGateway.isParsedMatch("{\"version\":21,\"purchase_log\":null}")).isFalse();
+        // The REAL unparsed shape (verified live): no version, od_data present but has_parsed=false, and no
+        // objectives/purchase_log. Rejected at the PRIMARY gate because "version" is absent, so the corroborator
+        // path never runs here — that "od_data presence does not corroborate" is shown by the NEXT assertion.
+        assertThat(L2CachingGateway.isParsedMatch(
+                "{\"match_id\":1,\"od_data\":{\"has_api\":true,\"has_parsed\":false},\"players\":[{}]}")).isFalse();
+        // Hardening: a stray NESTED numeric "version" plus unparsed od_data must NOT false-positive — this body
+        // DOES reach the corroborator path (the version probe matches), but no genuinely-parsed corroborator is
+        // present, proving od_data's mere presence (with has_parsed:false) cannot corroborate.
+        assertThat(L2CachingGateway.isParsedMatch(
+                "{\"od_data\":{\"has_parsed\":false},\"players\":[{\"ability_upgrades\":[{\"version\":5}]}]}")).isFalse();
         // null body.
         assertThat(L2CachingGateway.isParsedMatch(null)).isFalse();
     }
@@ -89,7 +100,7 @@ class L2ClassifyTest {
     @Test
     void parseGateIgnoresWhitespaceAndKeyOrder() {
         assertThat(L2CachingGateway.isParsedMatch(
-                "{\n  \"od_data\" : {\"a\":1},\n  \"version\"  :  7\n}")).isTrue();
+                "{\n  \"od_data\" : {\"has_parsed\": true},\n  \"version\"  :  7\n}")).isTrue();
     }
 
     @Test

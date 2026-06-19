@@ -174,18 +174,24 @@ Recommended implementation — a tiny hand-rolled check, in order of preference:
    then check the next non-whitespace value token is a digit/number rather than `null`. A
    regex such as `"version"\s*:\s*\d` (anchored to a JSON value position) is acceptable given
    the dep-free constraint. This is the same signal OpenDota's own UI uses to decide "parsed".
-2. **Corroborating signal (defence in depth, optional).** Presence of a non-null `od_data`
-   object, or a non-empty `players[].purchase_log`, or non-null `objectives`. These only appear
-   on parsed matches. Use one of them as a secondary guard so a future API quirk where `version`
-   is populated but the parse payload is absent doesn't cause a false-permanent store.
+2. **Corroborating signal (defence in depth).** A field that is genuinely *false/absent* on an
+   unparsed body, so it actually constrains the unanchored `version` probe: `od_data.has_parsed:true`,
+   a non-null `objectives`, or a non-empty `players[].purchase_log`. **Do not** use the mere presence
+   of `od_data` — verified against a live unparsed match, OpenDota returns `od_data` as
+   `{"has_parsed":false,...}` on unparsed matches, so `od_data` presence is always true and carries no
+   signal. The corroborator must require `has_parsed:true` (the field OpenDota actually flips on parse)
+   or one of the parse-only arrays, so a stray numeric `"version"` substring alone can't false-permanent
+   an unparsed match.
 
 **Risk of a false-permanent store, and how the signal bounds it:**
 - *False negative* (parsed match read as unparsed): harmless — we simply don't durably store it
   this time and re-fetch later. Costs one extra upstream call.
 - *False positive* (unparsed match stored as PERMANENT): the harmful case — pins a stale body
   forever. The `version`-is-a-number check is conservative precisely because OpenDota populates
-  `version` *only* after parsing; the optional corroborating field makes a false positive require
-  *two* independent fields to be wrongly present. Combined with the schema_version rebuild escape
+  `version` *only* after parsing; the gate then *requires* (not optionally) a genuinely parse-only
+  corroborator (`od_data.has_parsed:true`, a non-null `objectives`, or a non-null `purchase_log`),
+  so a false positive now needs *both* a numeric `"version"` substring **and** a mandatory
+  parse-only field to be wrongly present at once. Combined with the schema_version rebuild escape
   hatch (§6.3) and the absence of any unbounded harm (a stale match is still a valid past match,
   just less detailed), the residual risk is acceptable. **Do not** attempt a full structural
   validation; the cheap probe plus the rebuild escape hatch is the right cost/robustness balance
@@ -415,8 +421,9 @@ build (`mvn -B -f sidecar/pom.xml clean verify`) and should use a temp-file or i
    (and no parse fields). Assert: classified PERMANENT, but after a miss+fetch the row is **not**
    in L2 (and `l2StoreSkippedUnparsed` incremented). A second request re-fetches.
 2. **Parsed match IS stored permanent and survives a simulated restart.** Body with
-   `version: 21` (and `od_data`/`objectives` present). Assert it is stored, then a new gateway
-   instance over the *same db file* serves it from L2 without calling the client.
+   `version: 21` and a genuine parse-only corroborator (`od_data.has_parsed:true`, or a non-null
+   `objectives`/`purchase_log`). Assert it is stored, then a new gateway instance over the *same db
+   file* serves it from L2 without calling the client.
 3. **PERMANENT survives TTL expiry / never expires by time.** A stored parsed match remains an
    L2 hit even after advancing well past any L1 TTL horizon (PERMANENT rows have
    `expires_at IS NULL`).

@@ -35,7 +35,7 @@ class L2StoreTest {
         Path db = tmp.resolve("l2.db");
         // Open at version 1, insert a row.
         try (L2Store store = new L2Store(db, 1)) {
-            store.put("/matches/1", "{\"version\":1,\"od_data\":{}}", Classification.PERMANENT,
+            store.put("/matches/1", "{\"version\":1,\"od_data\":{\"has_parsed\":true}}", Classification.PERMANENT,
                     System.currentTimeMillis(), null, 1, null);
             assertThat(store.rowCount()).isEqualTo(1);
         }
