@@ -279,11 +279,11 @@ class L2CachingGatewayTest {
     void capEvictionKeepsCountWithinLimit(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
         CountingClient client = new CountingClient()
-                .with("/matches/1", "{\"match_id\":1,\"version\":1,\"od_data\":{}}")
-                .with("/matches/2", "{\"match_id\":2,\"version\":1,\"od_data\":{}}")
-                .with("/matches/3", "{\"match_id\":3,\"version\":1,\"od_data\":{}}")
-                .with("/matches/4", "{\"match_id\":4,\"version\":1,\"od_data\":{}}")
-                .with("/matches/5", "{\"match_id\":5,\"version\":1,\"od_data\":{}}");
+                .with("/matches/1", "{\"match_id\":1,\"version\":1,\"od_data\":{\"has_parsed\":true}}")
+                .with("/matches/2", "{\"match_id\":2,\"version\":1,\"od_data\":{\"has_parsed\":true}}")
+                .with("/matches/3", "{\"match_id\":3,\"version\":1,\"od_data\":{\"has_parsed\":true}}")
+                .with("/matches/4", "{\"match_id\":4,\"version\":1,\"od_data\":{\"has_parsed\":true}}")
+                .with("/matches/5", "{\"match_id\":5,\"version\":1,\"od_data\":{\"has_parsed\":true}}");
         try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
              L2CachingGateway gw = new L2CachingGateway(client, store, config(db, 3, 512L * 1024 * 1024, null))) {
             for (int i = 1; i <= 5; i++) {

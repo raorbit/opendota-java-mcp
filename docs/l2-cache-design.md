@@ -174,10 +174,14 @@ Recommended implementation — a tiny hand-rolled check, in order of preference:
    then check the next non-whitespace value token is a digit/number rather than `null`. A
    regex such as `"version"\s*:\s*\d` (anchored to a JSON value position) is acceptable given
    the dep-free constraint. This is the same signal OpenDota's own UI uses to decide "parsed".
-2. **Corroborating signal (defence in depth, optional).** Presence of a non-null `od_data`
-   object, or a non-empty `players[].purchase_log`, or non-null `objectives`. These only appear
-   on parsed matches. Use one of them as a secondary guard so a future API quirk where `version`
-   is populated but the parse payload is absent doesn't cause a false-permanent store.
+2. **Corroborating signal (defence in depth).** A field that is genuinely *false/absent* on an
+   unparsed body, so it actually constrains the unanchored `version` probe: `od_data.has_parsed:true`,
+   a non-null `objectives`, or a non-empty `players[].purchase_log`. **Do not** use the mere presence
+   of `od_data` — verified against a live unparsed match, OpenDota returns `od_data` as
+   `{"has_parsed":false,...}` on unparsed matches, so `od_data` presence is always true and carries no
+   signal. The corroborator must require `has_parsed:true` (the field OpenDota actually flips on parse)
+   or one of the parse-only arrays, so a stray numeric `"version"` substring alone can't false-permanent
+   an unparsed match.
 
 **Risk of a false-permanent store, and how the signal bounds it:**
 - *False negative* (parsed match read as unparsed): harmless — we simply don't durably store it

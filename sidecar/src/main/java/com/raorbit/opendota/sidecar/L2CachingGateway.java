@@ -40,8 +40,13 @@ public final class L2CachingGateway implements AutoCloseable {
     private static final Pattern PARSED_VERSION = Pattern.compile("\"version\"\\s*:\\s*\\d");
     /** Latest-patch probe for {@code /constants/patch}: numeric {@code "id"} values (dep-free, not a parse). */
     private static final Pattern PATCH_ID_NUM = Pattern.compile("\"id\"\\s*:\\s*(\\d+)");
-    /** Precompiled corroborating parse-field probes (the matched key's value must be non-null). */
-    private static final Pattern OD_DATA_KEY = Pattern.compile("\"od_data\"\\s*:\\s*");
+    /**
+     * Precompiled corroborating parse-field probes — each is genuinely present ONLY on a parsed match
+     * (verified against a live unparsed body). {@code od_data} is deliberately NOT a corroborator: it
+     * is present (as {@code {"has_parsed":false,...}}) on unparsed matches, so its mere presence carries
+     * no signal; we read {@code has_parsed:true} instead, the field OpenDota actually flips on parse.
+     */
+    private static final Pattern HAS_PARSED_TRUE = Pattern.compile("\"has_parsed\"\\s*:\\s*true");
     private static final Pattern OBJECTIVES_KEY = Pattern.compile("\"objectives\"\\s*:\\s*");
     private static final Pattern PURCHASE_LOG_KEY = Pattern.compile("\"purchase_log\"\\s*:\\s*");
 
@@ -278,9 +283,13 @@ public final class L2CachingGateway implements AutoCloseable {
     }
 
     /**
-     * Parse-gate signal (spec §5.1): a {@code /matches/{id}} body is FULLY PARSED when the top-level
-     * {@code "version"} is a non-null number <em>and</em> at least one corroborating parse field is
-     * present (defence in depth). Cheap, dep-free string probes over the already size-capped body.
+     * Parse-gate signal (spec §5.1): a {@code /matches/{id}} body is FULLY PARSED when its {@code "version"}
+     * is a number <em>and</em> at least one genuinely parse-only field corroborates it. The corroboration
+     * matters because the probes are unanchored substring scans: it must be a signal that is actually FALSE
+     * on unparsed bodies, so a stray numeric {@code "version"} substring alone can't pin an unparsed match
+     * PERMANENT. Verified against a live unparsed match: {@code version} is absent, {@code od_data} is present
+     * but {@code has_parsed:false}, and {@code objectives}/{@code purchase_log} are absent — hence we require
+     * {@code has_parsed:true} or a non-null {@code objectives}/{@code purchase_log}, never bare {@code od_data}.
      */
     public static boolean isParsedMatch(String body) {
         if (body == null) {
@@ -289,10 +298,7 @@ public final class L2CachingGateway implements AutoCloseable {
         if (!PARSED_VERSION.matcher(body).find()) {
             return false;
         }
-        // Corroborating signal: any one of these only appears (non-null) on parsed matches. All three
-        // use the non-null check — a bare contains() would wrongly accept "purchase_log":null on an
-        // otherwise-unparsed body and pin it PERMANENT forever.
-        return hasNonNullValue(body, OD_DATA_KEY)
+        return HAS_PARSED_TRUE.matcher(body).find()
                 || hasNonNullValue(body, OBJECTIVES_KEY)
                 || hasNonNullValue(body, PURCHASE_LOG_KEY);
     }
