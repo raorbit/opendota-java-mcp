@@ -38,8 +38,12 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 class L2CachingGatewayTest {
 
     // ---- realistic-ish bodies ----
+    // A REAL unparsed OpenDota match has "version" ABSENT (not null) and od_data present as
+    // {"has_parsed":false,...} — the shape verified live for the parse-gate (see L2CachingGateway
+    // §5.1). No "version":<digit> appears, so PARSED_VERSION never matches and this stays UNPARSED.
     private static final String UNPARSED_MATCH =
-            "{\"match_id\":111,\"version\":null,\"radiant_win\":true}";
+            "{\"match_id\":111,\"radiant_win\":true,"
+                    + "\"od_data\":{\"has_api\":true,\"has_parsed\":false},\"players\":[{}]}";
     private static final String PARSED_MATCH =
             "{\"match_id\":111,\"version\":21,\"radiant_win\":true,"
                     + "\"od_data\":{\"has_parsed\":true},\"objectives\":[{\"type\":\"tower\"}]}";

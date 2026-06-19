@@ -84,11 +84,13 @@ class L2ClassifyTest {
         // must be non-null; a bare contains() would wrongly accept this).
         assertThat(L2CachingGateway.isParsedMatch("{\"version\":21,\"purchase_log\":null}")).isFalse();
         // The REAL unparsed shape (verified live): no version, od_data present but has_parsed=false, and no
-        // objectives/purchase_log. od_data's mere presence must NOT corroborate.
+        // objectives/purchase_log. Rejected at the PRIMARY gate because "version" is absent, so the corroborator
+        // path never runs here — that "od_data presence does not corroborate" is shown by the NEXT assertion.
         assertThat(L2CachingGateway.isParsedMatch(
                 "{\"match_id\":1,\"od_data\":{\"has_api\":true,\"has_parsed\":false},\"players\":[{}]}")).isFalse();
-        // Hardening: a stray NESTED numeric "version" plus unparsed od_data must NOT false-positive — the
-        // version probe alone can't pin it, because no genuinely-parsed corroborator is present.
+        // Hardening: a stray NESTED numeric "version" plus unparsed od_data must NOT false-positive — this body
+        // DOES reach the corroborator path (the version probe matches), but no genuinely-parsed corroborator is
+        // present, proving od_data's mere presence (with has_parsed:false) cannot corroborate.
         assertThat(L2CachingGateway.isParsedMatch(
                 "{\"od_data\":{\"has_parsed\":false},\"players\":[{\"ability_upgrades\":[{\"version\":5}]}]}")).isFalse();
         // null body.
