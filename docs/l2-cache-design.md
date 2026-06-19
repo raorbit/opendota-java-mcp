@@ -136,6 +136,9 @@ OpenDota path the sidecar already forwards (e.g. `/matches/123`, `/players/456/r
 | `/publicMatches`                                       | **TTL** | A rolling recent-match feed. |
 | `/rankings`                                            | **TTL** | Aggregate, changes continuously. |
 | `/search`                                              | **TTL** | Search results drift. |
+| `/heroes/{id}/…` (per-hero sub-paths, not the static `/heroes` list) | **TTL** | Rolling per-hero aggregates over recent matches; volatile, not patch-pinned. |
+| `/benchmarks`                                          | **TTL** | Percentile benchmarks over recent matches; a slow-moving aggregate (1h). |
+| `/distributions`                                       | **TTL** | MMR/rank distribution histograms; change very slowly (6h). |
 | `/live`                                                | **NO_STORE** | Live game state — never durable. |
 | *anything else (default)*                              | **NO_STORE** | Conservative default: an unrecognised path is never persisted. |
 
@@ -379,13 +382,15 @@ file-backed path).
 The gateway wraps `client.getJson`, so the request order per call is:
 
 1. `classify(path)`.
-2. If NO_STORE (or TTL in v1): `return client.getJson(path)` directly — pure passthrough; L1 +
-   single-flight + rate limiter all still apply inside the client.
-3. If PERMANENT: **L2 read first.**
-   - Hit (and, for static, `patch_id` current): return stored body. `l2Hit++`. No client call,
-     no permit consumed, no upstream hit — the whole point.
-   - Miss: call `client.getJson(path)` (this is where L1/single-flight/rate limiting happen),
-     then parse-gate (§5.1) and, if eligible, store to L2. `l2Miss++`, and `l2Store++` if stored.
+2. If NO_STORE: `return client.getJson(path)` directly — pure passthrough; L1 + single-flight +
+   rate limiter all still apply inside the client. This is the **only** early-return class.
+3. If PERMANENT **or TTL**: **L2 read first.**
+   - Hit (non-expired; and, for static, `patch_id` current): return stored body. `l2Hit++`. No
+     client call, no permit consumed, no upstream hit — the whole point.
+   - Miss: call `client.getJson(path)` (this is where L1/single-flight/rate limiting happen), then
+     conditionally store to L2 — PERMANENT is parse-gated (§5.1) and stored with `expires_at = NULL`;
+     TTL is stored with `expires_at = now + ttlFor(path)` and no parse-gate. `l2Miss++`, and
+     `l2Store++` if stored.
 
 Single-flight is preserved because **all** L2 misses funnel into the *same* `client.getJson`,
 whose `inFlight` map collapses concurrent identical misses into one upstream call. A subtle
@@ -410,7 +415,7 @@ overwrites cleanly on the `path` primary key.
 `L2CachingGateway` maintains in-memory counters (e.g. `AtomicLong`s), exposed via `stats()`:
 
 - `l2Hit` — served from L2 without calling the client.
-- `l2Miss` — classified PERMANENT but not in L2 (fell through to the client).
+- `l2Miss` — a PERMANENT or TTL path not (or no longer) in L2 (fell through to the client).
 - `l2Store` — bodies written to L2 (post parse-gate).
 - `l2StoreSkippedUnparsed` — `/matches/{id}` misses that were *not* stored because unparsed
   (the parse-gate's observability — a high value here means lots of in-flight unparsed matches).
