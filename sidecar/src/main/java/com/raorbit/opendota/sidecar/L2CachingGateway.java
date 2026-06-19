@@ -4,6 +4,7 @@ import com.raorbit.opendota.client.OpenDotaClient;
 import com.raorbit.opendota.client.OpenDotaException;
 
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -16,10 +17,12 @@ import java.util.logging.Logger;
  * The durable L2 cache decorator (see {@code docs/l2-cache-design.md} §2, §3).
  *
  * <p>Wraps a single {@link OpenDotaClient}: on each {@link #get} it classifies the path, consults
- * the SQLite {@link L2Store} for PERMANENT hits, delegates misses to {@code client.getJson} (where
- * L1 + single-flight + the rate limiter still run, unchanged), parse-gates {@code /matches/{id}}
- * bodies, and conditionally stores the result. L2 is a best-effort accelerator: any
- * {@link SQLException} is counted, logged at warning, and never fails the request.
+ * the SQLite {@link L2Store} for PERMANENT and (non-expired) TTL hits, delegates misses to
+ * {@code client.getJson} (where L1 + single-flight + the rate limiter still run, unchanged),
+ * parse-gates {@code /matches/{id}} bodies, and conditionally stores the result — PERMANENT with no
+ * expiry, TTL with {@code expires_at = now + ttlFor(path)} for cross-restart warmth within the TTL
+ * window. L2 is a best-effort accelerator: any {@link SQLException} is counted, logged at warning,
+ * and never fails the request.
  *
  * <p>The four copied client classes are untouched; all L2 logic lives here, around the client.
  */
@@ -84,22 +87,23 @@ public final class L2CachingGateway implements AutoCloseable {
      */
     public String get(String path) throws OpenDotaException {
         Classification c = classify(path);
-        if (c == Classification.NO_STORE || c == Classification.TTL) {
-            // v1: TTL is not stored; both NO_STORE and TTL are pure passthrough to the client,
-            // where L1 + single-flight + the rate limiter still apply.
+        if (c == Classification.NO_STORE) {
+            // Pure passthrough to the client: L1 + single-flight + the rate limiter still apply.
             noStore.incrementAndGet();
             return client.getJson(path);
         }
 
-        // PERMANENT. For patch-scoped static data, run the lazy patch check first so a stale
-        // generation is busted before we read it (and the per-row guard catches any survivor).
+        // PERMANENT or TTL. Patch-scoping applies ONLY to PERMANENT static data; TTL paths are
+        // never patch-scoped (isPatchScoped is false for every TTL path), so no patch check runs.
+        // For patch-scoped static data, run the lazy patch check first so a stale generation is
+        // busted before we read it (and the per-row guard catches any survivor).
         boolean patchScoped = isPatchScoped(path);
         String currentPatchId = null;
         if (patchScoped) {
             currentPatchId = maybeCheckPatch();
         }
 
-        // L2 read first.
+        // L2 read first (lookup already applies the expires_at predicate for TTL rows).
         L2Store.Entry hit = lookup(path, patchScoped, currentPatchId);
         if (hit != null) {
             l2Hit.incrementAndGet();
@@ -110,8 +114,8 @@ public final class L2CachingGateway implements AutoCloseable {
         l2Miss.incrementAndGet();
         String body = client.getJson(path);
 
-        // Parse-gate + conditional store.
-        maybeStore(path, body, patchScoped, currentPatchId);
+        // Conditional store: PERMANENT parse-gates matches; TTL stamps expires_at.
+        maybeStore(path, body, c, patchScoped, currentPatchId);
         return body;
     }
 
@@ -143,35 +147,64 @@ public final class L2CachingGateway implements AutoCloseable {
         }
     }
 
-    /** Parse-gate (matches) and conditionally store the body; counts and eviction follow. */
-    private void maybeStore(String path, String body, boolean patchScoped, String currentPatchId) {
+    /**
+     * Conditionally store the body, branching on classification. PERMANENT keeps its v1 behaviour
+     * (parse-gate matches, stamp {@code patch_id}, {@code expires_at = NULL}). TTL stores with
+     * {@code expires_at = now + ttlFor(path)}, {@code patch_id = NULL}, and no parse-gate (parse-gating
+     * is matches/PERMANENT only). Counts and eviction follow.
+     */
+    private void maybeStore(String path, String body, Classification c,
+                            boolean patchScoped, String currentPatchId) {
         if (body == null) {
             return;
         }
-        if (patchScoped && currentPatchId == null) {
-            // The patch id is unknown (a transient patch-check failure). Storing a patch-scoped row
-            // with patch_id=NULL would make it survive every future patchBust() (which spares NULL
-            // match rows) AND the per-row stale guard (which skips NULL patch_ids) — permanent stale
-            // data. Skip the store; the next request re-fetches once the patch id resolves.
-            return;
+
+        long now = System.currentTimeMillis();
+        Classification storeClass;
+        Long expiresAt;
+        String patchId;
+
+        if (c == Classification.TTL) {
+            // TTL: never parse-gated (parse-gating is matches-only) and never patch-scoped, so the
+            // expires_at is the only difference from a PERMANENT store.
+            long ttlMs = client.ttlFor(path).toMillis();
+            if (ttlMs <= 0) {
+                // ttlFor mapped this path to a non-positive horizon (no TTL-classified path does today,
+                // but a future taxonomy edit might): nothing durable to store. Benign no-op miss —
+                // already counted l2Miss in get(); do NOT count l2Store.
+                return;
+            }
+            storeClass = Classification.TTL;
+            expiresAt = now + ttlMs;
+            patchId = null;
+        } else {
+            // PERMANENT — unchanged from v1.
+            if (patchScoped && currentPatchId == null) {
+                // The patch id is unknown (a transient patch-check failure). Storing a patch-scoped row
+                // with patch_id=NULL would make it survive every future patchBust() (which spares NULL
+                // match rows) AND the per-row stale guard (which skips NULL patch_ids) — permanent stale
+                // data. Skip the store; the next request re-fetches once the patch id resolves.
+                return;
+            }
+            boolean isMatch = MATCH_ID.matcher(stripQuery(path)).matches();
+            if (isMatch && !isParsedMatch(body)) {
+                // Unparsed match: do NOT store permanently — re-fetch next time (spec §5.1).
+                l2StoreSkippedUnparsed.incrementAndGet();
+                return;
+            }
+            storeClass = Classification.PERMANENT;
+            expiresAt = null;   // PERMANENT: never expires by time.
+            patchId = patchScoped ? currentPatchId : null;
         }
-        boolean isMatch = MATCH_ID.matcher(stripQuery(path)).matches();
-        if (isMatch && !isParsedMatch(body)) {
-            // Unparsed match: do NOT store permanently — re-fetch next time (spec §5.1).
-            l2StoreSkippedUnparsed.incrementAndGet();
-            return;
-        }
+
         // Collapse a burst of concurrent single-flight misses for the same path into ONE write: the
         // upstream call was already shared, so re-INSERTing the identical row (and bumping l2Store)
-        // once per caller is pure churn on the serialized write connection.
+        // once per caller is pure churn on the serialized write connection. Applies to both classes.
         if (!storing.add(path)) {
             return;
         }
-        Long expiresAt = null;   // PERMANENT: never expires by time.
-        String patchId = patchScoped ? currentPatchId : null;
         try {
-            store.put(path, body, Classification.PERMANENT, System.currentTimeMillis(),
-                    expiresAt, L2Store.SCHEMA_VERSION, patchId);
+            store.put(path, body, storeClass, now, expiresAt, L2Store.SCHEMA_VERSION, patchId);
             l2Store.incrementAndGet();
             enforceCaps();
         } catch (SQLException ex) {
@@ -353,7 +386,7 @@ public final class L2CachingGateway implements AutoCloseable {
         if (p.startsWith("/constants/")) {
             return Classification.PERMANENT;
         }
-        // Volatile feeds — TTL (not stored in v1).
+        // Volatile feeds — TTL (durably stored with expires_at = now + ttlFor(path)).
         if (p.startsWith("/players/")) {
             return Classification.TTL;
         }
@@ -370,8 +403,9 @@ public final class L2CachingGateway implements AutoCloseable {
             return Classification.TTL;
         }
         // Rolling aggregates over recent matches / a drifting player-base histogram — volatile, so
-        // TTL (not durably pinned), matching the /heroes/{id}/* treatment. Classified explicitly
-        // rather than via the NO_STORE default so they aren't mistaken for uncacheable like /live.
+        // TTL (stored durably until their ttlFor horizon, not patch-pinned), matching the
+        // /heroes/{id}/* treatment. Classified explicitly rather than via the NO_STORE default so
+        // they aren't mistaken for uncacheable like /live.
         if (p.startsWith("/benchmarks")) {
             return Classification.TTL;
         }
