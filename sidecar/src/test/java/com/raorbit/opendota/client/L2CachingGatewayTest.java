@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -272,26 +273,33 @@ class L2CachingGatewayTest {
     private static final String DISTRIBUTIONS_BODY = "{\"ranks\":{\"rows\":[]}}";
     private static final long DISTRIBUTIONS_TTL_MS = Duration.ofHours(6).toMillis();   // ttlFor(/distributions)
 
-    /** Read a single column for {@code path} directly from the db file (bypassing the read predicates). */
+    /**
+     * Read a single column for {@code path} directly from the db file (bypassing the read predicates).
+     * {@code col} is a trusted test-literal column name; {@code path} is bound as a parameter.
+     */
     private static Long longCol(Path db, String col, String path) throws SQLException {
         try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db.toAbsolutePath());
-             Statement st = c.createStatement();
-             ResultSet rs = st.executeQuery(
-                     "SELECT " + col + " FROM cache_entries WHERE path = '" + path + "'")) {
-            if (!rs.next()) {
-                return null;
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT " + col + " FROM cache_entries WHERE path = ?")) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                long v = rs.getLong(1);
+                return rs.wasNull() ? null : v;
             }
-            long v = rs.getLong(1);
-            return rs.wasNull() ? null : v;
         }
     }
 
     private static String strCol(Path db, String col, String path) throws SQLException {
         try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db.toAbsolutePath());
-             Statement st = c.createStatement();
-             ResultSet rs = st.executeQuery(
-                     "SELECT " + col + " FROM cache_entries WHERE path = '" + path + "'")) {
-            return rs.next() ? rs.getString(1) : null;
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT " + col + " FROM cache_entries WHERE path = ?")) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
         }
     }
 
@@ -392,7 +400,9 @@ class L2CachingGatewayTest {
              L2CachingGateway gw = new L2CachingGateway(client, store, config(db, 3, 512L * 1024 * 1024, null))) {
             for (int i = 1; i <= 5; i++) {
                 gw.get("/benchmarks?hero_id=" + i);
-                Thread.sleep(2);   // distinct, increasing stored_at for deterministic LRU order
+                // Exceed a coarse system-clock granularity (legacy Windows timer ~15.6ms) so each
+                // store gets a strictly-increasing stored_at and the LRU eviction order is deterministic.
+                Thread.sleep(25);
             }
             assertThat(store.rowCount()).isLessThanOrEqualTo(3);
             // The oldest TTL rows (1, 2) were evicted regardless of class; the newest survive.
@@ -447,6 +457,30 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- v2.7 (invariant): every classify()-TTL prefix has a POSITIVE ttlFor horizon ----
+    // classify() (the durability class) and ttlFor() (the horizon) are independent tables in different
+    // classes. A TTL-classified path whose ttlFor is non-positive would be silently dropped by
+    // maybeStore's defensive ttlMs<=0 skip (stored as nothing, never durable). This enumerates the TTL
+    // set and pins the seam, so a future taxonomy edit that adds a TTL prefix without a positive ttlFor
+    // entry fails here at build time rather than silently degrading to a non-durable path.
+    @Test
+    void everyTtlClassifiedPathHasPositiveTtlForHorizon() throws Exception {
+        String[] ttlPaths = {
+                "/players/123", "/proMatches", "/publicMatches", "/rankings",
+                "/search?q=x", "/benchmarks?hero_id=1", "/distributions", "/heroes/14/matches",
+        };
+        try (OpenDotaClient client = new CountingClient()) {
+            for (String path : ttlPaths) {
+                assertThat(L2CachingGateway.classify(path))
+                        .as("classify(%s)", path)
+                        .isEqualTo(com.raorbit.opendota.sidecar.Classification.TTL);
+                assertThat(client.ttlFor(path).toMillis())
+                        .as("ttlFor(%s) must be positive so the TTL row is actually stored durably", path)
+                        .isPositive();
+            }
+        }
+    }
+
     // ---- Gate 9: cap eviction ----
     @Test
     void capEvictionKeepsCountWithinLimit(@TempDir Path tmp) throws Exception {
@@ -461,7 +495,9 @@ class L2CachingGatewayTest {
              L2CachingGateway gw = new L2CachingGateway(client, store, config(db, 3, 512L * 1024 * 1024, null))) {
             for (int i = 1; i <= 5; i++) {
                 gw.get("/matches/" + i);
-                Thread.sleep(2);   // ensure distinct, increasing stored_at for deterministic LRU order
+                // Exceed a coarse system-clock granularity (legacy Windows timer ~15.6ms) so each
+                // store gets a strictly-increasing stored_at and the LRU eviction order is deterministic.
+                Thread.sleep(25);
             }
             assertThat(store.rowCount()).isLessThanOrEqualTo(3);
             // The oldest (1, 2) were evicted; the newest survive.
