@@ -298,6 +298,8 @@ public final class L2CachingGateway implements AutoCloseable {
         if (!PARSED_VERSION.matcher(body).find()) {
             return false;
         }
+        // has_parsed is a value-EQUALITY probe (must equal true), NOT a non-null check: routing it through
+        // hasNonNullValue would wrongly accept "has_parsed":false (the unparsed case). Keep it inline.
         return HAS_PARSED_TRUE.matcher(body).find()
                 || hasNonNullValue(body, OBJECTIVES_KEY)
                 || hasNonNullValue(body, PURCHASE_LOG_KEY);
