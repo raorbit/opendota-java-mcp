@@ -315,6 +315,10 @@ class OpenDotaClientTest {
         assertThat(client.ttlFor("/teams/15/matches")).isEqualTo(Duration.ofSeconds(60));
         assertThat(client.ttlFor("/leagues/4210")).isEqualTo(Duration.ofHours(1));
         assertThat(client.ttlFor("/leagues/4210/matches")).isEqualTo(Duration.ofSeconds(60));
+        assertThat(client.ttlFor("/health")).isEqualTo(Duration.ZERO);
+        assertThat(client.ttlFor("/records/kills")).isEqualTo(Duration.ofHours(1));
+        assertThat(client.ttlFor("/parsedMatches")).isEqualTo(Duration.ofSeconds(60));
+        assertThat(client.ttlFor("/metadata")).isEqualTo(Duration.ofMinutes(5));
         assertThat(client.ttlFor(null)).isEqualTo(Duration.ofSeconds(30));
     }
 
