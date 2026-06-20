@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -147,5 +148,35 @@ class HeroToolsTest {
                 .contains("\"status\":500")
                 .contains("\"error\":\"internal error\"")
                 .doesNotContain("boom");
+    }
+
+    @Test
+    void heroDeepDivesBuildSubResourcePaths() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        HeroTools tools = new HeroTools(client);
+
+        // hero_id 44 = Phantom Assassin.
+        tools.getHeroMatchups(44);
+        tools.getHeroItemPopularity(44);
+        tools.getHeroDurations(44);
+        tools.getHeroPlayers(44);
+        tools.getHeroMatches(44);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        verify(client, times(5)).getJson(path.capture());
+        assertThat(path.getAllValues()).containsExactly(
+                "/heroes/44/matchups", "/heroes/44/itemPopularity", "/heroes/44/durations",
+                "/heroes/44/players", "/heroes/44/matches");
+    }
+
+    @Test
+    void heroDeepDiveWithNullHeroIdReturnsBadArgWithoutCallingClient() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        HeroTools tools = new HeroTools(client);
+
+        assertThat(tools.getHeroMatchups(null))
+                .contains("\"isError\":true").contains("\"status\":400");
+        verify(client, never()).getJson(anyString());
     }
 }
