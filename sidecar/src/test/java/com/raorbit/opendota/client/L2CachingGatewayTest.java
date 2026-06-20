@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -263,18 +264,220 @@ class L2CachingGatewayTest {
         }
     }
 
-    // ---- TTL is not stored in v1 (passthrough), but the schema retains the column ----
+    // ==== v2 durable-TTL gate tests (docs/l2-cache-design.md §7.2) ====
+
+    private static final String BENCHMARKS = "/benchmarks?hero_id=1";
+    private static final String BENCHMARKS_BODY = "{\"result\":{\"gold_per_min\":[]}}";
+    private static final long BENCHMARKS_TTL_MS = Duration.ofHours(1).toMillis();   // ttlFor(/benchmarks)
+    private static final String DISTRIBUTIONS = "/distributions";
+    private static final String DISTRIBUTIONS_BODY = "{\"ranks\":{\"rows\":[]}}";
+    private static final long DISTRIBUTIONS_TTL_MS = Duration.ofHours(6).toMillis();   // ttlFor(/distributions)
+
+    /**
+     * Read a single column for {@code path} directly from the db file (bypassing the read predicates).
+     * {@code col} is a trusted test-literal column name; {@code path} is bound as a parameter.
+     */
+    private static Long longCol(Path db, String col, String path) throws SQLException {
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db.toAbsolutePath());
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT " + col + " FROM cache_entries WHERE path = ?")) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                long v = rs.getLong(1);
+                return rs.wasNull() ? null : v;
+            }
+        }
+    }
+
+    private static String strCol(Path db, String col, String path) throws SQLException {
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db.toAbsolutePath());
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT " + col + " FROM cache_entries WHERE path = ?")) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
+    // ---- v2.1: a TTL path is stored with a non-null expires_at == stored_at + ttlFor ----
     @Test
-    void ttlPathsAreNotStoredInV1(@TempDir Path tmp) throws Exception {
+    void ttlPathIsStoredWithExpiry(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
-        CountingClient client = new CountingClient().with("/players/123", "{\"profile\":{}}");
+        CountingClient client = new CountingClient().with(BENCHMARKS, BENCHMARKS_BODY);
         try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
              L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
-            gw.get("/players/123");
-            gw.get("/players/123");
-            // Both calls fell through to the client (no L2 store/serve for TTL in v1).
-            assertThat(client.calls.get()).isEqualTo(2);
-            assertThat(store.get("/players/123")).isNull();
+            assertThat(L2CachingGateway.classify(BENCHMARKS)).isEqualTo(
+                    com.raorbit.opendota.sidecar.Classification.TTL);
+
+            assertThat(gw.get(BENCHMARKS)).isEqualTo(BENCHMARKS_BODY);
+
+            L2Store.Entry e = store.get(BENCHMARKS);
+            assertThat(e).isNotNull();
+            assertThat(e.classification()).isEqualTo("TTL");
+            assertThat(e.expiresAt()).isNotNull();
+            assertThat(e.patchId()).isNull();
+            // expires_at - stored_at is exactly ttlFor(path) (one `now` used for both, no drift).
+            assertThat(e.expiresAt() - e.storedAt()).isEqualTo(BENCHMARKS_TTL_MS);
+
+            // l2Store ticked, noStore did NOT (only NO_STORE counts noStore now).
+            assertThat(gw.stats().l2Store()).isEqualTo(1);
+            assertThat(gw.stats().l2Miss()).isEqualTo(1);
+            assertThat(gw.stats().noStore()).isZero();
+        }
+    }
+
+    // ---- v2.2: a non-expired TTL row is served from L2 across a simulated restart ----
+    @Test
+    void ttlRowServedFromL2AcrossRestartBeforeExpiry(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // Use the 6h-TTL /distributions so real wall-clock test time stays well inside the window.
+        CountingClient client = new CountingClient().with(DISTRIBUTIONS, DISTRIBUTIONS_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
+            assertThat(gw.get(DISTRIBUTIONS)).isEqualTo(DISTRIBUTIONS_BODY);
+            assertThat(gw.stats().l2Store()).isEqualTo(1);
+        }
+        assertThat(client.calls.get()).isEqualTo(1);
+
+        // New gateway + new store over the SAME db file, with a fresh client that has NO canned body
+        // (any delegation would 404). The served body must come from L2 — cross-restart warmth.
+        CountingClient freshClient = new CountingClient();
+        try (L2Store store2 = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw2 = new L2CachingGateway(freshClient, store2, config(db))) {
+            assertThat(gw2.get(DISTRIBUTIONS)).isEqualTo(DISTRIBUTIONS_BODY);
+            assertThat(freshClient.calls.get()).isZero();
+            assertThat(gw2.stats().l2Hit()).isEqualTo(1);
+        }
+    }
+
+    // ---- v2.3: an expired TTL row is a miss, re-fetched, and re-stored in place (no duplicate row) ----
+    @Test
+    void expiredTtlRowIsMissedReFetchedAndReStoredInPlace(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // Hand-insert an ALREADY-EXPIRED /benchmarks row (expires_at in the past) so lazy-expiry fires
+        // deterministically without touching real time.
+        long past = System.currentTimeMillis() - 1;
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put(BENCHMARKS, "{\"stale\":true}", com.raorbit.opendota.sidecar.Classification.TTL,
+                    past - BENCHMARKS_TTL_MS, past, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.rowCount()).isEqualTo(1);
+        }
+
+        CountingClient client = new CountingClient().with(BENCHMARKS, BENCHMARKS_BODY);   // fresh body
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
+            // The expired row is NOT served: lookup returns null (lazy-expiry), so we re-fetch upstream.
+            assertThat(gw.get(BENCHMARKS)).isEqualTo(BENCHMARKS_BODY);
+            assertThat(client.calls.get()).isEqualTo(1);
+            assertThat(gw.stats().l2Miss()).isEqualTo(1);
+            assertThat(gw.stats().l2Store()).isEqualTo(1);
+
+            // INSERT OR REPLACE on the path PK: still exactly one row, now with the fresh body and a
+            // future expires_at.
+            assertThat(store.rowCount()).isEqualTo(1);
+            L2Store.Entry e = store.get(BENCHMARKS);
+            assertThat(e).isNotNull();
+            assertThat(e.body()).isEqualTo(BENCHMARKS_BODY);
+            assertThat(e.expiresAt()).isGreaterThan(System.currentTimeMillis());
+        }
+    }
+
+    // ---- v2.4: TTL rows are evicted under the row cap (class-agnostic LRU) ----
+    @Test
+    void ttlRowsEvictedUnderCap(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient()
+                .with("/benchmarks?hero_id=1", "{\"r\":1}")
+                .with("/benchmarks?hero_id=2", "{\"r\":2}")
+                .with("/benchmarks?hero_id=3", "{\"r\":3}")
+                .with("/benchmarks?hero_id=4", "{\"r\":4}")
+                .with("/benchmarks?hero_id=5", "{\"r\":5}");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, 3, 512L * 1024 * 1024, null))) {
+            for (int i = 1; i <= 5; i++) {
+                gw.get("/benchmarks?hero_id=" + i);
+                // Exceed a coarse system-clock granularity (legacy Windows timer ~15.6ms) so each
+                // store gets a strictly-increasing stored_at and the LRU eviction order is deterministic.
+                Thread.sleep(25);
+            }
+            assertThat(store.rowCount()).isLessThanOrEqualTo(3);
+            // The oldest TTL rows (1, 2) were evicted regardless of class; the newest survive.
+            assertThat(store.get("/benchmarks?hero_id=1")).isNull();
+            assertThat(store.get("/benchmarks?hero_id=2")).isNull();
+            assertThat(store.get("/benchmarks?hero_id=5")).isNotNull();
+        }
+    }
+
+    // ---- v2.5: re-storing a TTL path refreshes (advances) its expires_at, never stacks a row ----
+    @Test
+    void reStoreRefreshesTtlExpiry(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // Seed an already-expired row at a known-old stored_at so we can prove expires_at advanced.
+        long oldStored = 1_000L;
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put(BENCHMARKS, "{\"old\":true}", com.raorbit.opendota.sidecar.Classification.TTL,
+                    oldStored, oldStored + BENCHMARKS_TTL_MS, L2Store.SCHEMA_VERSION, null);
+        }
+        Long oldExpires = longCol(db, "expires_at", BENCHMARKS);
+        assertThat(oldExpires).isEqualTo(oldStored + BENCHMARKS_TTL_MS);
+
+        long before = System.currentTimeMillis();
+        CountingClient client = new CountingClient().with(BENCHMARKS, BENCHMARKS_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
+            gw.get(BENCHMARKS);   // expired -> miss -> re-fetch -> re-store (INSERT OR REPLACE)
+            assertThat(store.rowCount()).isEqualTo(1);   // overwritten, not stacked
+            Long newExpires = longCol(db, "expires_at", BENCHMARKS);
+            assertThat(newExpires).isNotNull();
+            // The refreshed expires_at is at least `before + ttl` (advanced far past the old value).
+            assertThat(newExpires).isGreaterThanOrEqualTo(before + BENCHMARKS_TTL_MS);
+            assertThat(newExpires).isGreaterThan(oldExpires);
+            assertThat(strCol(db, "patch_id", BENCHMARKS)).isNull();
+        }
+    }
+
+    // ---- v2.6 (regression): noStore counts ONLY NO_STORE now (no longer TTL) ----
+    @Test
+    void noStoreCountsOnlyNoStoreNotTtl(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient()
+                .with("/live", "[{\"match_id\":1}]")
+                .with(BENCHMARKS, BENCHMARKS_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
+            gw.get("/live");        // NO_STORE -> noStore++
+            gw.get(BENCHMARKS);     // TTL -> l2Miss++/l2Store++, NOT noStore
+            assertThat(gw.stats().noStore()).isEqualTo(1);
+            assertThat(gw.stats().l2Store()).isEqualTo(1);
+            assertThat(gw.stats().l2Miss()).isEqualTo(1);
+        }
+    }
+
+    // ---- v2.7 (invariant): every classify()-TTL prefix has a POSITIVE ttlFor horizon ----
+    // classify() (the durability class) and ttlFor() (the horizon) are independent tables in different
+    // classes. A TTL-classified path whose ttlFor is non-positive would be silently dropped by
+    // maybeStore's defensive ttlMs<=0 skip (stored as nothing, never durable). This enumerates the TTL
+    // set and pins the seam, so a future taxonomy edit that adds a TTL prefix without a positive ttlFor
+    // entry fails here at build time rather than silently degrading to a non-durable path.
+    @Test
+    void everyTtlClassifiedPathHasPositiveTtlForHorizon() throws Exception {
+        String[] ttlPaths = {
+                "/players/123", "/proMatches", "/publicMatches", "/rankings",
+                "/search?q=x", "/benchmarks?hero_id=1", "/distributions", "/heroes/14/matches",
+        };
+        try (OpenDotaClient client = new CountingClient()) {
+            for (String path : ttlPaths) {
+                assertThat(L2CachingGateway.classify(path))
+                        .as("classify(%s)", path)
+                        .isEqualTo(com.raorbit.opendota.sidecar.Classification.TTL);
+                assertThat(client.ttlFor(path).toMillis())
+                        .as("ttlFor(%s) must be positive so the TTL row is actually stored durably", path)
+                        .isPositive();
+            }
         }
     }
 
@@ -292,7 +495,9 @@ class L2CachingGatewayTest {
              L2CachingGateway gw = new L2CachingGateway(client, store, config(db, 3, 512L * 1024 * 1024, null))) {
             for (int i = 1; i <= 5; i++) {
                 gw.get("/matches/" + i);
-                Thread.sleep(2);   // ensure distinct, increasing stored_at for deterministic LRU order
+                // Exceed a coarse system-clock granularity (legacy Windows timer ~15.6ms) so each
+                // store gets a strictly-increasing stored_at and the LRU eviction order is deterministic.
+                Thread.sleep(25);
             }
             assertThat(store.rowCount()).isLessThanOrEqualTo(3);
             // The oldest (1, 2) were evicted; the newest survive.

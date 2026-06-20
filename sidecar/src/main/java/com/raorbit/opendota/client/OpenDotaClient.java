@@ -448,8 +448,12 @@ public class OpenDotaClient implements AutoCloseable {
      * Resolve the cache TTL for a request path. The query string (if any) is
      * stripped before prefix matching, and more-specific prefixes are checked
      * before more-general ones.
+     *
+     * <p>Public so a co-located caller (the sidecar's durable cache) can reuse the resolved
+     * per-path horizon as a single source of truth rather than duplicating this table. Drift-guarded:
+     * edit only the root copy and mirror via {@code scripts/sync-client-copies.sh}.
      */
-    Duration ttlFor(String path) {
+    public Duration ttlFor(String path) {
         if (path == null) {
             return Duration.ofSeconds(30);
         }

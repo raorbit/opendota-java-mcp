@@ -1,8 +1,11 @@
 # L2 Durable Cache Design (Sidecar Phase 2)
 
-Status: **SPEC — deferred / not yet implemented.** This document is the design contract a later
-commit implements. It describes a durable SQLite L2 cache tier that lives **inside the sidecar
-only**. Nothing here touches the root `opendota-mcp` jar.
+Status: **IMPLEMENTED (v2 — durable TTL).** This document is the design contract for a durable
+SQLite L2 cache tier that lives **inside the sidecar only**. Nothing here touches the root
+`opendota-mcp` jar except a one-keyword visibility widening on `OpenDotaClient.ttlFor` (now
+`public`), mirrored into the sidecar copy via `scripts/sync-client-copies.sh` so
+`ClientCopyDriftTest` stays green. v2 adds durable storage of **TTL-class** responses (with an
+`expires_at`); v1 (PERMANENT-only) behaviour is otherwise unchanged.
 
 ## 1. Goal and scope
 
@@ -18,8 +21,12 @@ static reference data: heroes, constants, hero stats). For those, L2 lets the si
 hit *across restarts* and *long after* the L1 TTL has elapsed, eliminating the most wasteful
 re-fetches against OpenDota's rate budget.
 
-L2 is explicitly **not** a general write-through cache for volatile data (player profiles,
-pro/public match lists, live games, searches). Those keep their existing L1-only behaviour.
+L2 durably stores immutable data forever (parsed matches, patch-scoped static reference data)
+**and**, since v2, volatile TTL-class data (player profiles, pro/public match lists, searches,
+benchmarks, distributions) until its `ttlFor(path)` horizon — surviving a restart within that
+window (most valuably the longer-TTL aggregates: `/benchmarks` 1h, `/distributions` 6h). L2 is
+**not** a write-through cache for `/live` or unrecognised paths (NO_STORE): those are a pure
+passthrough to the client and keep their existing L1-only behaviour.
 
 ### Non-goals
 - No change to L1 (`TtlCache`), single-flight, or the rate limiter — they stay inside
@@ -120,7 +127,7 @@ OpenDota path the sidecar already forwards (e.g. `/matches/123`, `/players/456/r
 
 | Prefix (after stripping `?…`)                          | Classification | Rationale |
 |--------------------------------------------------------|----------------|-----------|
-| `/matches/{id}` (i.e. `/matches/` + digits, no further `/`) | **PERMANENT (parse-gated)** | A finished, fully-parsed match is immutable. Store permanently **only if parsed** (§5.1). An unparsed match is treated as **TTL** until it parses. |
+| `/matches/{id}` (i.e. `/matches/` + digits, no further `/`) | **PERMANENT (parse-gated)** | A finished, fully-parsed match is immutable. Store permanently **only if parsed** (§5.1). An unparsed match stays PERMANENT-class but is **skipped** (not stored) and re-fetched next time until it parses. |
 | `/heroes`                                              | **PERMANENT (patch-scoped)** | Static hero list; changes only on a patch. Invalidated by patch bump (§5.2). |
 | `/heroStats`                                           | **PERMANENT (patch-scoped)** | Hero aggregate reference data; patch-scoped. |
 | `/constants/`                                          | **PERMANENT (patch-scoped)** | Game constants (items, abilities, patch, etc.); patch-scoped. |
@@ -129,6 +136,9 @@ OpenDota path the sidecar already forwards (e.g. `/matches/123`, `/players/456/r
 | `/publicMatches`                                       | **TTL** | A rolling recent-match feed. |
 | `/rankings`                                            | **TTL** | Aggregate, changes continuously. |
 | `/search`                                              | **TTL** | Search results drift. |
+| `/heroes/{id}/…` (per-hero sub-paths, not the static `/heroes` list) | **TTL** | Rolling per-hero aggregates over recent matches; volatile, not patch-pinned. |
+| `/benchmarks`                                          | **TTL** | Percentile benchmarks over recent matches; a slow-moving aggregate (1h). |
+| `/distributions`                                       | **TTL** | MMR/rank distribution histograms; change very slowly (6h). |
 | `/live`                                                | **NO_STORE** | Live game state — never durable. |
 | *anything else (default)*                              | **NO_STORE** | Conservative default: an unrecognised path is never persisted. |
 
@@ -136,14 +146,31 @@ Notes:
 - **PERMANENT** = eligible for durable storage with **no TTL expiry** (subject only to the
   patch-bust trigger for static data and the overall cap in §6.4). A PERMANENT match row never
   expires by time.
-- **TTL** = L2 *may* store the body with the same TTL `ttlFor` would assign, giving durability
-  across restart within that short window. This is a modest win; an implementer may legitimately
-  treat TTL as "L2 does not store, fall through to L1 only" in the first cut to keep L2 strictly
-  about the high-value immutable data. **Decision for the first implementation: TTL paths are
-  NOT stored in L2** (they fall through to the existing L1-only path). The TTL column still exists
-  in the table so the policy can be widened later without a schema change. The table above
-  documents intent; only PERMANENT actually writes L2 rows in v1.
-- **NO_STORE** = never read from or written to L2; pure passthrough to `client.getJson`.
+- **TTL** = L2 stores the body with `expires_at = stored_at + ttlFor(path)`, `patch_id = NULL`,
+  and **no parse-gate** (parse-gating is matches-only), giving durability across restart within
+  that window (v2). It flows through the **same** L2 read/store path as PERMANENT — only the
+  non-null `expires_at` differs. The read predicate (`expires_at IS NULL OR expires_at > now`)
+  treats an elapsed row as a miss, so a TTL row never serves stale: the next request re-fetches and
+  `INSERT OR REPLACE` overwrites it with a fresh `expires_at`. An unparsed `/matches/{id}` is **not**
+  reclassified as TTL — it stays PERMANENT-class and is simply skipped on the parse-gate (§5.1).
+- **NO_STORE** = never read from or written to L2; pure passthrough to `client.getJson`. It is the
+  **only** early-return class; both PERMANENT and TTL fall through to the L2 read/store path.
+
+#### TTL sourcing (v2)
+The per-path TTL comes from `OpenDotaClient.ttlFor(path)` — now `public` — which is the **single
+source of truth** for these horizons (`/benchmarks` 1h, `/distributions` 6h, `/heroes/{id}/*` 6h,
+`/players/` 30s, `/search` 15s, …). The gateway calls `client.ttlFor(path)` for the TTL-row
+duration and does **not** maintain a second prefix→`Duration` table in the sidecar: a duplicate
+table would silently diverge the first time a horizon is tuned in `ttlFor`. `ttlFor` is already
+drift-protected (it lives in the byte-copied `OpenDotaClient`, guarded by `ClientCopyDriftTest`),
+so reusing it inherits that guarantee. The one-keyword visibility change (`Duration ttlFor` →
+`public Duration ttlFor`) is made in the **root** copy and mirrored via
+`scripts/sync-client-copies.sh`, never hand-edited in one copy. `classify()` and `ttlFor()` are
+**complementary**: `classify` answers *which* durability class, `ttlFor` answers *how long* a
+TTL row lives — the gateway uses `classify` for the class and `ttlFor` only for a TTL row's
+duration, never to re-derive the class. (The taxonomies deliberately differ, e.g. `/matches/` is
+PERMANENT in `classify` but 60s in `ttlFor`.) A TTL path that `ttlFor` maps to a non-positive
+horizon is skipped (not stored, not counted) — defensive, as no TTL-classified path does today.
 - The match-id discrimination (`/matches/{id}` vs hypothetical future `/matches/...` subpaths)
   must be precise: classify PERMANENT only when the segment after `/matches/` is a non-empty run
   of digits and there is no further `/`. Any other `/matches/...` shape falls to the default
@@ -355,13 +382,15 @@ file-backed path).
 The gateway wraps `client.getJson`, so the request order per call is:
 
 1. `classify(path)`.
-2. If NO_STORE (or TTL in v1): `return client.getJson(path)` directly — pure passthrough; L1 +
-   single-flight + rate limiter all still apply inside the client.
-3. If PERMANENT: **L2 read first.**
-   - Hit (and, for static, `patch_id` current): return stored body. `l2Hit++`. No client call,
-     no permit consumed, no upstream hit — the whole point.
-   - Miss: call `client.getJson(path)` (this is where L1/single-flight/rate limiting happen),
-     then parse-gate (§5.1) and, if eligible, store to L2. `l2Miss++`, and `l2Store++` if stored.
+2. If NO_STORE: `return client.getJson(path)` directly — pure passthrough; L1 + single-flight +
+   rate limiter all still apply inside the client. This is the **only** early-return class.
+3. If PERMANENT **or TTL**: **L2 read first.**
+   - Hit (non-expired; and, for static, `patch_id` current): return stored body. `l2Hit++`. No
+     client call, no permit consumed, no upstream hit — the whole point.
+   - Miss: call `client.getJson(path)` (this is where L1/single-flight/rate limiting happen), then
+     conditionally store to L2 — PERMANENT is parse-gated (§5.1) and stored with `expires_at = NULL`;
+     TTL is stored with `expires_at = now + ttlFor(path)` and no parse-gate. `l2Miss++`, and
+     `l2Store++` if stored.
 
 Single-flight is preserved because **all** L2 misses funnel into the *same* `client.getJson`,
 whose `inFlight` map collapses concurrent identical misses into one upstream call. A subtle
@@ -386,7 +415,7 @@ overwrites cleanly on the `path` primary key.
 `L2CachingGateway` maintains in-memory counters (e.g. `AtomicLong`s), exposed via `stats()`:
 
 - `l2Hit` — served from L2 without calling the client.
-- `l2Miss` — classified PERMANENT but not in L2 (fell through to the client).
+- `l2Miss` — a PERMANENT or TTL path not (or no longer) in L2 (fell through to the client).
 - `l2Store` — bodies written to L2 (post parse-gate).
 - `l2StoreSkippedUnparsed` — `/matches/{id}` misses that were *not* stored because unparsed
   (the parse-gate's observability — a high value here means lots of in-flight unparsed matches).
