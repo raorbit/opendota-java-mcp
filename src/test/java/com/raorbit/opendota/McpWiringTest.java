@@ -46,6 +46,9 @@ class McpWiringTest {
                 "get_records", "get_parsed_matches", "get_metadata", "get_health",
                 "get_player_ratings", "get_player_rankings", "get_player_counts", "get_player_histograms",
                 "get_player_pros", "get_player_wardmap", "get_player_wordcloud");
+
+        // The write tools are opt-in; with the flag unset they must NOT be registered.
+        assertThat(names).doesNotContain("request_parse", "refresh_player", "get_parse_request");
     }
 
     @Test
