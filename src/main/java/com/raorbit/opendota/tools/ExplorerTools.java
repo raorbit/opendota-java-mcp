@@ -155,9 +155,11 @@ public class ExplorerTools {
      * {@code _types} map, {@code _parsers}, {@code RowCtor}, {@code _prebuiltEmptyResultObject},
      * {@code oid}, and the verbose per-column field metadata).
      *
-     * <p>A SQL error arrives as an HTTP 200 with a top-level {@code {"err":...}} (an {@code err}
-     * <em>column</em> would live under {@code rows[]}, not at the top level), so that is surfaced as
-     * the standard error envelope instead. A body that isn't valid JSON is passed through unchanged.
+     * <p>A SQL error arrives as an HTTP 200 with a non-null top-level {@code "err"} — note a
+     * <em>successful</em> response also carries {@code "err":null}, so the check is {@code hasNonNull},
+     * not mere presence, and an {@code err} <em>column</em> lives under {@code rows[]} rather than at the
+     * top level. The error is surfaced as the standard error envelope; a body that isn't valid JSON is
+     * passed through unchanged.
      */
     private static String shape(String body, String sqlExecuted) {
         JsonNode root;
@@ -166,7 +168,7 @@ public class ExplorerTools {
         } catch (JsonProcessingException e) {
             return body;
         }
-        if (root.has("err")) {
+        if (root.hasNonNull("err")) {
             return ToolResults.fromException(new OpenDotaException(422, "/explorer", root.get("err").asText()));
         }
         JsonNode rows = root.path("rows");
