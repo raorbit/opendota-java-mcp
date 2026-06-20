@@ -421,6 +421,11 @@ public final class L2CachingGateway implements AutoCloseable {
         if (p.startsWith("/distributions")) {
             return Classification.TTL;
         }
+        // Slow-moving record leaderboards, the rolling parse feed, and site metadata — TTL (durable
+        // until their ttlFor horizon). /health is intentionally NOT here: it falls to NO_STORE below.
+        if (p.startsWith("/records") || p.startsWith("/parsedMatches") || p.startsWith("/metadata")) {
+            return Classification.TTL;
+        }
         // Ad-hoc SQL: unique per query and 200s even on a SQL error — never store. (Explicit rather
         // than via the default below so a future reorder can't accidentally make it cacheable.)
         if (p.startsWith("/explorer")) {

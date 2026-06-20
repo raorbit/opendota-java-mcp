@@ -576,8 +576,21 @@ public class OpenDotaClient implements AutoCloseable {
             // A team/league's recent-matches feed is rolling; the team/league profile itself moves slowly.
             return p.endsWith("/matches") ? Duration.ofSeconds(60) : Duration.ofHours(1);
         }
-        if (p.startsWith("/live")) {
+        if (p.startsWith("/live") || p.startsWith("/health")) {
+            // Live game feed / API health snapshot — never cache.
             return Duration.ZERO;
+        }
+        if (p.startsWith("/records")) {
+            // All-time record leaderboards move very slowly.
+            return Duration.ofHours(1);
+        }
+        if (p.startsWith("/parsedMatches")) {
+            // The rolling public parse feed.
+            return Duration.ofSeconds(60);
+        }
+        if (p.startsWith("/metadata")) {
+            // Site-wide patch/banner metadata; semi-static.
+            return Duration.ofMinutes(5);
         }
         if (p.startsWith("/players/")) {
             return Duration.ofSeconds(30);

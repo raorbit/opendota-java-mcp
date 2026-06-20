@@ -5,6 +5,7 @@ import com.raorbit.opendota.tools.ExplorerTools;
 import com.raorbit.opendota.tools.HeroTools;
 import com.raorbit.opendota.tools.LeagueTools;
 import com.raorbit.opendota.tools.MatchTools;
+import com.raorbit.opendota.tools.MiscTools;
 import com.raorbit.opendota.tools.PlayerTools;
 import com.raorbit.opendota.tools.ProTools;
 import com.raorbit.opendota.tools.TeamTools;
@@ -36,9 +37,10 @@ public class McpToolConfig {
     @Bean
     ToolCallbackProvider opendotaTools(PlayerTools playerTools, MatchTools matchTools, HeroTools heroTools,
                                        ExplorerTools explorerTools, TeamTools teamTools, LeagueTools leagueTools,
-                                       ProTools proTools) {
+                                       ProTools proTools, MiscTools miscTools) {
         return MethodToolCallbackProvider.builder()
-                .toolObjects(playerTools, matchTools, heroTools, explorerTools, teamTools, leagueTools, proTools)
+                .toolObjects(playerTools, matchTools, heroTools, explorerTools, teamTools, leagueTools,
+                        proTools, miscTools)
                 .build();
     }
 }

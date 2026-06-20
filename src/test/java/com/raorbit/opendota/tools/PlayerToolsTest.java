@@ -174,6 +174,37 @@ class PlayerToolsTest {
     }
 
     @Test
+    void playerSubResourcesBuildPaths() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        PlayerTools tools = new PlayerTools(client);
+
+        tools.getPlayerRatings(5L);
+        tools.getPlayerRankings(5L);
+        tools.getPlayerCounts(5L);
+        tools.getPlayerHistograms(5L, "kills");
+        tools.getPlayerPros(5L);
+        tools.getPlayerWardmap(5L);
+        tools.getPlayerWordcloud(5L);
+
+        ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(client, org.mockito.Mockito.times(7)).getJson(path.capture());
+        assertThat(path.getAllValues()).containsExactly(
+                "/players/5/ratings", "/players/5/rankings", "/players/5/counts",
+                "/players/5/histograms/kills", "/players/5/pros", "/players/5/wardmap", "/players/5/wordcloud");
+    }
+
+    @Test
+    void getPlayerHistogramsWithBlankFieldReturnsBadArg() {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        PlayerTools tools = new PlayerTools(client);
+
+        assertThat(tools.getPlayerHistograms(5L, " "))
+                .contains("\"isError\":true").contains("\"status\":400");
+        org.mockito.Mockito.verifyNoInteractions(client);
+    }
+
+    @Test
     void getPlayerReturnsErrorEnvelopeOnException() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         when(client.getJson(anyString()))
