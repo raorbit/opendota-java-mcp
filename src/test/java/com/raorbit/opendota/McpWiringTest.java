@@ -43,6 +43,8 @@ class McpWiringTest {
                 "get_hero_matchups", "get_hero_item_popularity", "get_hero_durations",
                 "get_hero_players", "get_hero_matches",
                 "get_team", "get_team_matches", "get_league", "get_league_matches", "get_pro_players",
+                "get_top_players", "get_teams", "get_team_players", "get_team_heroes",
+                "get_leagues", "get_league_teams",
                 "get_records", "get_parsed_matches", "get_metadata", "get_health",
                 "get_player_ratings", "get_player_rankings", "get_player_counts", "get_player_histograms",
                 "get_player_pros", "get_player_wardmap", "get_player_wordcloud");

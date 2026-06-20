@@ -57,6 +57,52 @@ class CompetitiveToolsTest {
     }
 
     @Test
+    void getTopPlayersBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        assertThat(run(() -> new ProTools(client).getTopPlayers(), client)).isEqualTo("/topPlayers");
+    }
+
+    @Test
+    void getTeamsBuildsPathWithOptionalPage() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        assertThat(run(() -> new TeamTools(client).getTeams(null), client)).isEqualTo("/teams");
+
+        OpenDotaClient paged = mock(OpenDotaClient.class);
+        when(paged.getJson(anyString())).thenReturn("[]");
+        assertThat(run(() -> new TeamTools(paged).getTeams(2), paged)).isEqualTo("/teams?page=2");
+    }
+
+    @Test
+    void getTeamPlayersBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        assertThat(run(() -> new TeamTools(client).getTeamPlayers(15L), client)).isEqualTo("/teams/15/players");
+    }
+
+    @Test
+    void getTeamHeroesBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        assertThat(run(() -> new TeamTools(client).getTeamHeroes(15L), client)).isEqualTo("/teams/15/heroes");
+    }
+
+    @Test
+    void getLeaguesBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        assertThat(run(() -> new LeagueTools(client).getLeagues(), client)).isEqualTo("/leagues");
+    }
+
+    @Test
+    void getLeagueTeamsBuildsPath() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("[]");
+        assertThat(run(() -> new LeagueTools(client).getLeagueTeams(4210L), client)).isEqualTo("/leagues/4210/teams");
+    }
+
+    @Test
     void mapsUpstreamFailureToErrorEnvelope() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         when(client.getJson(anyString()))

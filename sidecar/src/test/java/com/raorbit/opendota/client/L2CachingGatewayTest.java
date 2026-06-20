@@ -468,8 +468,8 @@ class L2CachingGatewayTest {
         String[] ttlPaths = {
                 "/players/123", "/proMatches", "/publicMatches", "/rankings",
                 "/search?q=x", "/benchmarks?hero_id=1", "/distributions", "/heroes/14/matches",
-                "/schema", "/proPlayers", "/teams/15", "/teams/15/matches",
-                "/leagues/4210", "/leagues/4210/matches",
+                "/schema", "/proPlayers", "/topPlayers", "/teams/15", "/teams/15/matches",
+                "/teams/15/players", "/leagues/4210", "/leagues/4210/matches", "/leagues/4210/teams",
                 "/records/kills", "/parsedMatches", "/metadata",
         };
         try (OpenDotaClient client = new CountingClient()) {
