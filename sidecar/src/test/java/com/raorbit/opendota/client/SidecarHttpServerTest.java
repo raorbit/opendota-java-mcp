@@ -102,7 +102,7 @@ class SidecarHttpServerTest {
     void healthReturnsOk() throws Exception {
         HttpResponse<String> r = get("/health");
         assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(r.body()).contains("ok");
+        assertThat(r.body()).contains("ok").contains("\"version\":");
     }
 
     @Test
