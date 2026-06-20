@@ -340,9 +340,23 @@ public class OpenDotaClient implements AutoCloseable {
             String body = cached != null ? cached : fetch(path, cacheKey, ttl, true);
             mine.complete(body);
             return body;
-        } catch (OpenDotaException | RuntimeException e) {
-            mine.completeExceptionally(e);
-            throw e;
+        } catch (Throwable t) {
+            // Complete the future for EVERY failure type — crucially java.lang.Error (OOM/StackOverflow),
+            // which a `catch (OpenDotaException | RuntimeException)` would miss, leaving the future
+            // uncompleted and any follower parked in await() hung forever. Re-throw the original type so
+            // an Error stays fatal on this thread rather than being masked. (The final wrap is unreachable
+            // today — fetch() declares only OpenDotaException — but guards a future signature change.)
+            mine.completeExceptionally(t);
+            if (t instanceof OpenDotaException ode) {
+                throw ode;
+            }
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+            if (t instanceof Error err) {
+                throw err;
+            }
+            throw new OpenDotaException(0, path, "unexpected error", t);
         } finally {
             inFlight.remove(cacheKey, mine);
         }
@@ -360,13 +374,28 @@ public class OpenDotaClient implements AutoCloseable {
             if (cause instanceof OpenDotaException ode) {
                 throw ode;
             }
+            // Re-throw the leader's Error/RuntimeException as-is so a follower sees the SAME failure the
+            // leader did — an Error stays fatal here too, rather than being buried in a clean error
+            // envelope while the leader thread dies fatally (an asymmetry worse than the original hang).
+            if (cause instanceof Error err) {
+                throw err;
+            }
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
             throw new OpenDotaException(0, path,
                     "request failed: " + (cause == null ? "unknown" : cause.getClass().getSimpleName()), cause);
         }
     }
 
-    /** Perform the rate-limited HTTP GET, caching a 2xx body when {@code cacheable}. */
-    private String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
+    /**
+     * Perform the rate-limited HTTP GET, caching a 2xx body when {@code cacheable}.
+     *
+     * <p>Package-private (rather than {@code private}) solely so the single-flight follower-hang test can
+     * subclass this client and make the leader's call fail with an {@link Error} — an outcome that cannot
+     * be produced through the real HTTP path. Treat it as private otherwise.
+     */
+    String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
         String url = base + path;
         if (keyed) {
             // Encode the key so an operator-supplied value containing characters
