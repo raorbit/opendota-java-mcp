@@ -195,7 +195,9 @@ class ExplorerToolsTest {
     void shapesAwayNodePostgresInternals() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         // A realistic /explorer body: node-postgres's raw result object with all its internals.
-        String raw = "{\"command\":\"SELECT\",\"rowCount\":1,\"oid\":null,"
+        // NOTE the top-level "err":null — a SUCCESSFUL response carries it, so the shaper must treat
+        // null err as success (not surface a 422).
+        String raw = "{\"command\":\"SELECT\",\"rowCount\":1,\"oid\":null,\"err\":null,"
                 + "\"rows\":[{\"n\":250422}],"
                 + "\"fields\":[{\"name\":\"n\",\"tableID\":0,\"columnID\":0,\"dataTypeID\":20}],"
                 + "\"_parsers\":[null],\"_types\":{\"builtins\":{\"BOOL\":16,\"INT8\":20}},"
@@ -206,17 +208,33 @@ class ExplorerToolsTest {
         String result = tools.runSqlExplorer("SELECT count(*) AS n FROM matches", 200);
 
         assertThat(result)
+                .doesNotContain("\"isError\"")
                 .contains("\"command\":\"SELECT\"")
                 .contains("\"rowCount\":1")
                 .contains("\"fields\":[\"n\"]")
                 .contains("\"rows\":[{\"n\":250422}]")
                 .contains("\"sql_executed\":\"SELECT count(*) AS n FROM matches LIMIT 200\"")
+                .doesNotContain("\"err\"")
                 .doesNotContain("_types")
                 .doesNotContain("_parsers")
                 .doesNotContain("dataTypeID")
                 .doesNotContain("RowCtor")
                 .doesNotContain("_prebuiltEmptyResultObject")
                 .doesNotContain("oid");
+    }
+
+    @Test
+    void nullTopLevelErrIsSuccessNotAnError() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        // The exact regression: a successful query whose body carries "err":null must NOT 422.
+        when(client.getJson(anyString())).thenReturn("{\"command\":\"SELECT\",\"err\":null,\"rows\":[{\"x\":1}]}");
+        ExplorerTools tools = new ExplorerTools(client);
+
+        String result = tools.runSqlExplorer("SELECT 1 AS x", null);
+
+        assertThat(result)
+                .doesNotContain("\"isError\"")
+                .contains("\"rows\":[{\"x\":1}]");
     }
 
     @Test
