@@ -183,8 +183,40 @@ class ExplorerToolsTest {
 
         String result = tools.runSqlExplorer("SELECT err FROM foo", null);
 
-        // A top-level err is the only error shape; an err *inside rows* passes through unchanged.
-        assertThat(result).isEqualTo(body);
+        // Only a TOP-LEVEL err is the error shape; an err *column* under rows[] is real data, so the
+        // body is shaped (not an error envelope) and the row + field name are preserved.
+        assertThat(result)
+                .doesNotContain("\"isError\"")
+                .contains("\"fields\":[\"err\"]")
+                .contains("\"rows\":[{\"err\":\"some value\"}]");
+    }
+
+    @Test
+    void shapesAwayNodePostgresInternals() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        // A realistic /explorer body: node-postgres's raw result object with all its internals.
+        String raw = "{\"command\":\"SELECT\",\"rowCount\":1,\"oid\":null,"
+                + "\"rows\":[{\"n\":250422}],"
+                + "\"fields\":[{\"name\":\"n\",\"tableID\":0,\"columnID\":0,\"dataTypeID\":20}],"
+                + "\"_parsers\":[null],\"_types\":{\"builtins\":{\"BOOL\":16,\"INT8\":20}},"
+                + "\"RowCtor\":null,\"_prebuiltEmptyResultObject\":{\"n\":null}}";
+        when(client.getJson(anyString())).thenReturn(raw);
+        ExplorerTools tools = new ExplorerTools(client);
+
+        String result = tools.runSqlExplorer("SELECT count(*) AS n FROM matches", 200);
+
+        assertThat(result)
+                .contains("\"command\":\"SELECT\"")
+                .contains("\"rowCount\":1")
+                .contains("\"fields\":[\"n\"]")
+                .contains("\"rows\":[{\"n\":250422}]")
+                .contains("\"sql_executed\":\"SELECT count(*) AS n FROM matches LIMIT 200\"")
+                .doesNotContain("_types")
+                .doesNotContain("_parsers")
+                .doesNotContain("dataTypeID")
+                .doesNotContain("RowCtor")
+                .doesNotContain("_prebuiltEmptyResultObject")
+                .doesNotContain("oid");
     }
 
     @Test

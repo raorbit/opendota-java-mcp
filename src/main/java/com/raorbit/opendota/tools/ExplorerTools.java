@@ -1,5 +1,10 @@
 package com.raorbit.opendota.tools;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.raorbit.opendota.client.OpenDotaClient;
 import com.raorbit.opendota.client.OpenDotaException;
 import com.raorbit.opendota.client.ToolResults;
@@ -13,10 +18,14 @@ import org.springframework.stereotype.Component;
  * MCP tools exposing OpenDota's ad-hoc SQL warehouse: a guarded read-only {@code /explorer}
  * query tool plus a {@code /schema} companion so the model can ground its queries.
  *
- * <p>Like every tool here, both return a {@code String} (raw 2xx JSON passthrough or a JSON error
- * envelope) and never throw. The SQL guardrails are defense-in-depth plus predictable UX (clear
- * errors, a bounded result size) layered on top of OpenDota's already read-only DB role — not the
- * only thing standing between a bad query and the database.
+ * <p>Both return a {@code String} and never throw. {@code get_sql_schema} is a raw passthrough like
+ * every other tool, but {@code run_sql_explorer} is the one tool that <em>reshapes</em> its body:
+ * OpenDota's {@code /explorer} hands back node-postgres's internal result object (a ~600-token
+ * {@code _types} OID map, {@code _parsers}, {@code RowCtor}, per-column field metadata, …), almost all
+ * of which is context waste, so it is slimmed to {@code {command, rowCount, fields:[names], rows,
+ * sql_executed}}. The SQL guardrails are defense-in-depth plus predictable UX (clear errors, a bounded
+ * result size) layered on top of OpenDota's already read-only DB role — not the only thing standing
+ * between a bad query and the database.
  *
  * <p>The keyword/limit checks are heuristics over the raw SQL text (no parser): they pair the
  * SELECT/WITH-only start rule, the single-statement rule and the whole-word blocklist into a
@@ -41,14 +50,7 @@ public class ExplorerTools {
     private static final Pattern TRAILING_LIMIT =
             Pattern.compile("\\blimit\\s+(\\d+)\\s*$", Pattern.CASE_INSENSITIVE);
     private static final Pattern TRAILING_SEMICOLON = Pattern.compile(";\\s*$");
-    /**
-     * A top-level {@code "err":"..."} (OpenDota's SQL-error shape, which arrives as an HTTP 200),
-     * matched only when no {@code "rows"} key precedes it so an {@code err} column inside a result
-     * row isn't mistaken for the error. Group 1 is the (still JSON-escaped) error text.
-     */
-    private static final Pattern EXPLORER_ERR = Pattern.compile(
-            "\\A\\s*\\{(?:(?!\"rows\").)*?\"err\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"",
-            Pattern.DOTALL);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final OpenDotaClient client;
 
@@ -75,14 +77,7 @@ public class ExplorerTools {
         }
         String path = "/explorer?sql=" + OpenDotaClient.encode(guard.sql());
         try {
-            String body = client.getJson(path);
-            String err = explorerError(body);
-            if (err != null) {
-                // /explorer 200s with {"err":...} on a SQL error; surface it as the standard error
-                // envelope rather than passing the error body off as a success.
-                return ToolResults.fromException(new OpenDotaException(422, "/explorer", err));
-            }
-            return body;
+            return shape(client.getJson(path), guard.sql());
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
         } catch (RuntimeException e) {
@@ -153,17 +148,45 @@ public class ExplorerTools {
         return sql + " LIMIT " + cap;
     }
 
-    /** The error text of an OpenDota explorer {@code {"err":...}} body, or null if it isn't one. */
-    private static String explorerError(String body) {
-        if (body == null) {
-            return null;
+    /**
+     * Slim OpenDota's {@code /explorer} body to the useful fields. The upstream body is
+     * node-postgres's raw result object; this keeps {@code command}, {@code rowCount}, the column
+     * {@code names}, {@code rows}, and the executed SQL, and drops the rest (the ~600-token
+     * {@code _types} map, {@code _parsers}, {@code RowCtor}, {@code _prebuiltEmptyResultObject},
+     * {@code oid}, and the verbose per-column field metadata).
+     *
+     * <p>A SQL error arrives as an HTTP 200 with a top-level {@code {"err":...}} (an {@code err}
+     * <em>column</em> would live under {@code rows[]}, not at the top level), so that is surfaced as
+     * the standard error envelope instead. A body that isn't valid JSON is passed through unchanged.
+     */
+    private static String shape(String body, String sqlExecuted) {
+        JsonNode root;
+        try {
+            root = MAPPER.readTree(body);
+        } catch (JsonProcessingException e) {
+            return body;
         }
-        Matcher m = EXPLORER_ERR.matcher(body);
-        return m.find() ? unescapeJson(m.group(1)) : null;
-    }
-
-    /** Minimal JSON-string unescaping, enough to render a readable error message. */
-    private static String unescapeJson(String s) {
-        return s.replace("\\n", "\n").replace("\\t", "\t").replace("\\\"", "\"").replace("\\\\", "\\");
+        if (root.has("err")) {
+            return ToolResults.fromException(new OpenDotaException(422, "/explorer", root.get("err").asText()));
+        }
+        JsonNode rows = root.path("rows");
+        ObjectNode out = MAPPER.createObjectNode();
+        if (root.hasNonNull("command")) {
+            out.set("command", root.get("command"));
+        }
+        out.put("rowCount", root.path("rowCount").asInt(rows.size()));
+        ArrayNode names = out.putArray("fields");
+        for (JsonNode field : root.path("fields")) {
+            if (field.hasNonNull("name")) {
+                names.add(field.get("name").asText());
+            }
+        }
+        out.set("rows", rows.isArray() ? rows : MAPPER.createArrayNode());
+        out.put("sql_executed", sqlExecuted);
+        try {
+            return MAPPER.writeValueAsString(out);
+        } catch (JsonProcessingException e) {
+            return body;
+        }
     }
 }
