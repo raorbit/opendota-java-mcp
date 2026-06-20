@@ -409,7 +409,18 @@ public final class L2Store implements AutoCloseable {
      * @return the total number of rows evicted
      */
     public synchronized int enforceCaps(long maxRows, long maxBytes) throws SQLException {
-        int total = 0;
+        return enforceCaps(maxRows, maxBytes, System.currentTimeMillis());
+    }
+
+    /**
+     * As {@link #enforceCaps(long, long)} but with an explicit {@code now} (so tests can drive expiry
+     * deterministically). Reclaims expired TTL rows <em>first</em>, so a dead-but-newer TTL row can't
+     * push out a live-but-older PERMANENT row and dead rows don't consume the caps.
+     *
+     * @return the total number of rows evicted (expired + cap)
+     */
+    public synchronized int enforceCaps(long maxRows, long maxBytes, long now) throws SQLException {
+        int total = evictExpired(now);
         long overRows = currentRows.get() - maxRows;
         if (overRows > 0) {
             total += evictOldest((int) Math.min(Integer.MAX_VALUE, overRows));
@@ -423,6 +434,37 @@ public final class L2Store implements AutoCloseable {
             total += deleted;
         }
         return total;
+    }
+
+    /**
+     * Delete every TTL row whose {@code expires_at} has passed ({@code <= now}), reclaiming dead rows
+     * before they count against the caps or outlive a still-valid PERMANENT row. PERMANENT rows have
+     * {@code expires_at = NULL} and are never matched. A single {@code DELETE ... RETURNING} so the
+     * deleted rows and their summed bytes are the same set (mirrors {@link #patchBust()}).
+     *
+     * <p>Liveness is request-driven (spec §6.4): this runs inside {@link #enforceCaps}, i.e. after a
+     * store — a write-idle/read-heavy db still holds dead rows between stores, which the read predicate
+     * filters out anyway. Not a background sweep.
+     *
+     * @return the number of rows deleted
+     */
+    public synchronized int evictExpired(long now) throws SQLException {
+        String sql = "DELETE FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at <= ? "
+                + "RETURNING LENGTH(CAST(body AS BLOB))";
+        int deleted = 0;
+        long freedBytes = 0L;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, now);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    deleted++;
+                    freedBytes += rs.getLong(1);
+                }
+            }
+        }
+        currentRows.addAndGet(-deleted);
+        currentBytes.addAndGet(-freedBytes);
+        return deleted;
     }
 
     /**

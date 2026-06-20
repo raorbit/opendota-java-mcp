@@ -345,6 +345,14 @@ match history would grow the file without limit.
   alternative (an unbounded file) is worse and a re-fetch is always possible.
 - Eviction is best-effort and need not be transactional with the store; a transiently over-cap
   file is acceptable (same soft-bound stance as `TtlCache`).
+- **Liveness pass (first):** `enforceCaps` first runs `evictExpired(now)` —
+  `DELETE FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at <= ? RETURNING LENGTH(CAST(body AS BLOB))`
+  — to physically delete already-expired TTL rows before the `stored_at`-ascending cap pass. Without
+  this, a dead-but-newer TTL row could outlive an older-but-valid PERMANENT match (LRU orders by
+  `stored_at`, not liveness) and dead rows would count against the caps. The read predicate
+  (`expires_at IS NULL OR expires_at > now`) already hides expired rows from reads, so this is a
+  reclamation, not a correctness fix; it is request-driven (runs after a store), so a write-idle db
+  still holds dead-but-hidden rows between stores — acceptable for a soft-cap tier.
 
 A single-statement bulk delete is preferred, e.g.
 `DELETE FROM cache_entries WHERE path IN (SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)`

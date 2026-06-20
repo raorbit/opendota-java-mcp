@@ -130,6 +130,40 @@ class L2StoreTest {
     }
 
     @Test
+    void enforceCapsEvictsExpiredTtlBeforeOlderValidRows(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            long t0 = 1_000_000L;
+            // An OLDER PERMANENT match (no expiry) and a NEWER TTL row that expires at t0+10.
+            store.put("/matches/1", "{\"a\":1}", Classification.PERMANENT, t0, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/players/5", "{\"bb\":2}", Classification.TTL, t0 + 5, t0 + 10, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.rowCount()).isEqualTo(2);
+
+            // Generous caps (no cap pressure): with `now` past the TTL, only the dead row is reclaimed,
+            // and it must NOT take the older-but-valid PERMANENT row with it (the stored_at-ASC bug).
+            int evicted = store.enforceCaps(1000, 1L << 30, t0 + 100);
+
+            assertThat(evicted).isEqualTo(1);
+            assertThat(store.rowCount()).isEqualTo(1);
+            assertThat(store.get("/matches/1")).as("older valid PERMANENT row survives").isNotNull();
+            assertThat(store.totalBodyBytes())
+                    .isEqualTo("{\"a\":1}".getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        }
+    }
+
+    @Test
+    void enforceCapsKeepsTtlRowsThatHaveNotYetExpired(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            long t0 = 1_000_000L;
+            store.put("/players/5", "{\"b\":2}", Classification.TTL, t0, t0 + 1000, L2Store.SCHEMA_VERSION, null);
+            // `now` is before the expiry — the row is still live and must not be evicted.
+            assertThat(store.enforceCaps(1000, 1L << 30, t0 + 100)).isZero();
+            assertThat(store.rowCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
     void metaPatchIdRoundTrips(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
         try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
