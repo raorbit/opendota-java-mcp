@@ -61,7 +61,7 @@
     </dependencies>
 
     <build>
-        <finalName>opendota-sidecar-1.0.0</finalName>
+        <finalName>opendota-sidecar-${project.version}</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
