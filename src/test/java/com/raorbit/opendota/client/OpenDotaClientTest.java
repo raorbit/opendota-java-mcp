@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -358,6 +359,48 @@ class OpenDotaClientTest {
         assertThatThrownBy(() -> client.postJson("/request/999"))
                 .isInstanceOf(OpenDotaException.class)
                 .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(404));
+    }
+
+    @Test
+    void leaderErrorDoesNotHangFollowers() throws Exception {
+        CountDownLatch leaderEntered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        // A client whose single-flight leader fails with an Error — an outcome the real HTTP path can't
+        // produce, so fetch() is overridden via the package-private test seam.
+        OpenDotaClient client = new OpenDotaClient(null, base) {
+            @Override
+            String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) {
+                leaderEntered.countDown();
+                try {
+                    release.await(2, TimeUnit.SECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new StackOverflowError("boom");
+            }
+        };
+
+        int callers = 5;   // 1 leader + 4 followers, all single-flighting the same cacheable path
+        ExecutorService pool = Executors.newFixedThreadPool(callers);
+        List<Future<String>> futures = new ArrayList<>();
+        for (int i = 0; i < callers; i++) {
+            futures.add(pool.submit(() -> client.getJson("/heroes")));
+        }
+
+        assertThat(leaderEntered.await(2, TimeUnit.SECONDS)).isTrue();   // leader reached fetch
+        Thread.sleep(200);     // let the followers park on await(leader)
+        release.countDown();   // the leader now throws the Error
+
+        // The fix completes the leader's future exceptionally for an Error too, so every caller settles
+        // promptly. On the bug the parked followers block forever in await(leader).get() and these
+        // get(timeout) calls would throw TimeoutException instead of ExecutionException.
+        for (Future<String> f : futures) {
+            assertThatThrownBy(() -> f.get(5, TimeUnit.SECONDS))
+                    .isInstanceOf(ExecutionException.class)
+                    .hasRootCauseInstanceOf(StackOverflowError.class);
+        }
+        pool.shutdownNow();
+        client.close();
     }
 
     @Test

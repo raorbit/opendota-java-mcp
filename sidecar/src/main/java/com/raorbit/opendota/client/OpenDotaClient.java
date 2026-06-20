@@ -96,9 +96,11 @@ public class OpenDotaClient implements AutoCloseable {
      */
     private final long maxResponseBytes;
     /**
-     * Upper bound on time a request may spend waiting for a rate-limit permit.
-     * Kept comfortably under typical MCP client request timeouts so an exhausted
-     * bucket fails fast with an error envelope instead of parking indefinitely.
+     * Upper bound on the time a single {@code getJson} call may spend waiting for a rate-limit permit,
+     * <em>summed across its retry attempts</em> (a shared per-call deadline in {@code fetch()}, not a
+     * fresh budget per attempt). Kept comfortably under typical MCP client request timeouts so an
+     * exhausted bucket fails fast with an error envelope instead of parking indefinitely. This bounds
+     * cumulative permit-wait only — backoff sleeps and per-request timeouts are additional.
      */
     private final Duration rateLimitBudget;
     /** In-flight cacheable fetches, so concurrent identical requests share one call. */
@@ -340,9 +342,23 @@ public class OpenDotaClient implements AutoCloseable {
             String body = cached != null ? cached : fetch(path, cacheKey, ttl, true);
             mine.complete(body);
             return body;
-        } catch (OpenDotaException | RuntimeException e) {
-            mine.completeExceptionally(e);
-            throw e;
+        } catch (Throwable t) {
+            // Complete the future for EVERY failure type — crucially java.lang.Error (OOM/StackOverflow),
+            // which a `catch (OpenDotaException | RuntimeException)` would miss, leaving the future
+            // uncompleted and any follower parked in await() hung forever. Re-throw the original type so
+            // an Error stays fatal on this thread rather than being masked. (The final wrap is unreachable
+            // today — fetch() declares only OpenDotaException — but guards a future signature change.)
+            mine.completeExceptionally(t);
+            if (t instanceof OpenDotaException ode) {
+                throw ode;
+            }
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+            if (t instanceof Error err) {
+                throw err;
+            }
+            throw new OpenDotaException(0, path, "unexpected error", t);
         } finally {
             inFlight.remove(cacheKey, mine);
         }
@@ -360,13 +376,28 @@ public class OpenDotaClient implements AutoCloseable {
             if (cause instanceof OpenDotaException ode) {
                 throw ode;
             }
+            // Re-throw the leader's Error/RuntimeException as-is so a follower sees the SAME failure the
+            // leader did — an Error stays fatal here too, rather than being buried in a clean error
+            // envelope while the leader thread dies fatally (an asymmetry worse than the original hang).
+            if (cause instanceof Error err) {
+                throw err;
+            }
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
             throw new OpenDotaException(0, path,
                     "request failed: " + (cause == null ? "unknown" : cause.getClass().getSimpleName()), cause);
         }
     }
 
-    /** Perform the rate-limited HTTP GET, caching a 2xx body when {@code cacheable}. */
-    private String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
+    /**
+     * Perform the rate-limited HTTP GET, caching a 2xx body when {@code cacheable}.
+     *
+     * <p>Package-private (rather than {@code private}) solely so the single-flight follower-hang test can
+     * subclass this client and make the leader's call fail with an {@link Error} — an outcome that cannot
+     * be produced through the real HTTP path. Treat it as private otherwise.
+     */
+    String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
         String url = base + path;
         if (keyed) {
             // Encode the key so an operator-supplied value containing characters
@@ -389,18 +420,27 @@ public class OpenDotaClient implements AutoCloseable {
         // times with exponential backoff: a 5xx always, and a timeout/connect drop only on a normally-fast
         // endpoint. A slow endpoint that already gets the extended timeout is NOT retried on timeout — the
         // extra time is its resilience; retrying a genuinely-slow query (e.g. /search) just doubles the wait.
-        // Each attempt takes its own rate-limit permit. Forwarding never retries here (its refused-connection
-        // retry lives in send()).
+        // Each attempt takes its own rate-limit permit, but the wait for one is bounded ACROSS the whole
+        // call by a single deadline (below) rather than a fresh full budget per attempt — so a saturated
+        // bucket plus retries can't stack up to maxAttempts × rateLimitBudget. Forwarding never retries
+        // here (its refused-connection retry lives in send()).
         boolean slow = requestTimeout.compareTo(REQUEST_TIMEOUT) > 0;
         int maxAttempts = forwarding ? 1 : 1 + MAX_UPSTREAM_RETRIES;
         Duration backoff = UPSTREAM_RETRY_BASE_BACKOFF;
+        // One permit-wait deadline for the whole call: each attempt waits only until this, never a fresh
+        // full budget. Bounds the call's CUMULATIVE permit-wait by rateLimitBudget (not total wall time —
+        // backoff sleeps and per-request timeouts still add on top). In practice each retry's wait is about
+        // one token-refill interval (~1s keyless / ~0.2s keyed), so even the worst case is a few seconds.
+        long rateLimitDeadlineNanos = System.nanoTime() + rateLimitBudget.toNanos();
         for (int attempt = 1; ; attempt++) {
             // A forwarding client delegates rate limiting to the sidecar, so it must not consume a local
             // permit (its own limiter would wrongly throttle the loopback hop).
             if (!forwarding) {
                 boolean acquired;
                 try {
-                    acquired = rateLimiter.tryAcquire(rateLimitBudget);
+                    // tryAcquire degrades a <=0 wait to a single non-blocking try, so once the deadline
+                    // passes a retry's acquire no longer blocks.
+                    acquired = rateLimiter.tryAcquire(Duration.ofNanos(rateLimitDeadlineNanos - System.nanoTime()));
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     throw new OpenDotaException(0, path, "request interrupted", ie);

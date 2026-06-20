@@ -25,6 +25,13 @@ public class McpToolConfig {
 
     @Bean(destroyMethod = "close")
     OpenDotaClient openDotaClient(OpenDotaProperties properties) {
+        if (properties.isSidecarEnabled() && properties.isWriteToolsEnabled()) {
+            // The shared sidecar only proxies GETs, so a forwarded write tool would just 405. Fail fast
+            // at startup (before any tool call) rather than letting writes silently break in this combo.
+            throw new IllegalStateException("opendota.write-tools-enabled is not supported together with "
+                    + "opendota.sidecar-enabled: the shared sidecar only proxies GET requests. Run the write "
+                    + "tools on a direct (non-forwarding) server instead.");
+        }
         if (properties.isSidecarEnabled()) {
             // Forward every call to the shared local sidecar, which holds the API key
             // and owns the single rate limiter and cache. This server keeps no key.

@@ -39,6 +39,11 @@ public final class SidecarHttpServer implements AutoCloseable {
     private static final String API_PREFIX = "/api";
     /** Request header carrying the optional shared secret an auth-gated sidecar requires. */
     private static final String TOKEN_HEADER = "X-Sidecar-Token";
+    /**
+     * Coarse wire-contract version, surfaced on {@code /health} and {@code /stats} so an operator can spot
+     * a sidecar running a different build than its agents. Bump only on a wire-contract change.
+     */
+    private static final int CONTRACT_VERSION = 1;
 
     private final HttpServer server;
     private final OpenDotaClient client;
@@ -112,7 +117,7 @@ public final class SidecarHttpServer implements AutoCloseable {
             respond(exchange, 405, "{\"error\":\"method not allowed\"}");
             return;
         }
-        respond(exchange, 200, "{\"status\":\"ok\"}");
+        respond(exchange, 200, "{\"status\":\"ok\",\"version\":" + CONTRACT_VERSION + "}");
     }
 
     /**
@@ -142,7 +147,8 @@ public final class SidecarHttpServer implements AutoCloseable {
                     .append(",\"cacheEntries\":").append(s.cacheEntries())
                     .append(",\"cacheBytes\":").append(s.cacheBytes())
                     .append(",\"availablePermits\":").append(s.availablePermits())
-                    .append(",\"permitsPerMinute\":").append(s.permitsPerMinute());
+                    .append(",\"permitsPerMinute\":").append(s.permitsPerMinute())
+                    .append(",\"version\":").append(CONTRACT_VERSION);
             // Additively expose the L2 counters when the durable tier is enabled (the existing fields
             // above are unchanged, so statsReportsCacheAndLimiterCounters keeps passing).
             if (gateway != null) {

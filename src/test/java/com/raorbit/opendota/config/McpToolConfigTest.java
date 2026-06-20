@@ -4,6 +4,7 @@ import com.raorbit.opendota.client.OpenDotaClient;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for the {@link McpToolConfig} client wiring, exercising the
@@ -32,5 +33,18 @@ class McpToolConfigTest {
         try (OpenDotaClient client = new McpToolConfig().openDotaClient(props)) {
             assertThat(client).isNotNull();
         }
+    }
+
+    @Test
+    void rejectsWriteToolsCombinedWithSidecarAtStartup() {
+        // The shared sidecar only proxies GETs, so the openDotaClient bean factory (invoked during
+        // context startup) must fail fast for this combo rather than letting writes 405 at call time.
+        OpenDotaProperties props = new OpenDotaProperties();
+        props.setSidecarEnabled(true);
+        props.setWriteToolsEnabled(true);
+
+        assertThatThrownBy(() -> new McpToolConfig().openDotaClient(props))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("write-tools-enabled is not supported");
     }
 }

@@ -10,6 +10,8 @@ import com.raorbit.opendota.client.OpenDotaException;
 import com.raorbit.opendota.client.ToolResults;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
@@ -51,6 +53,7 @@ public class ExplorerTools {
             Pattern.compile("\\blimit\\s+(\\d+)\\s*$", Pattern.CASE_INSENSITIVE);
     private static final Pattern TRAILING_SEMICOLON = Pattern.compile(";\\s*$");
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Logger log = LoggerFactory.getLogger(ExplorerTools.class);
 
     private final OpenDotaClient client;
 
@@ -81,7 +84,7 @@ public class ExplorerTools {
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
         } catch (RuntimeException e) {
-            return ToolResults.internalError("/explorer");
+            return ToolResults.internalError("/explorer", e);
         }
     }
 
@@ -95,7 +98,7 @@ public class ExplorerTools {
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
         } catch (RuntimeException e) {
-            return ToolResults.internalError(path);
+            return ToolResults.internalError(path, e);
         }
     }
 
@@ -188,6 +191,10 @@ public class ExplorerTools {
         try {
             return MAPPER.writeValueAsString(out);
         } catch (JsonProcessingException e) {
+            // Re-serializing an ObjectNode we just built should never fail; if it somehow does, fall
+            // back to the raw body but leave a trace (the first catch above is the documented non-JSON
+            // passthrough and is intentionally not logged).
+            log.warn("failed to serialize the shaped /explorer result; passing the raw body through", e);
             return body;
         }
     }
