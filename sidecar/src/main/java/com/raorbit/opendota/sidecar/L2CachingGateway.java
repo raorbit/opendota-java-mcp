@@ -400,6 +400,11 @@ public final class L2CachingGateway implements AutoCloseable {
         if (p.startsWith("/publicMatches")) {
             return Classification.TTL;
         }
+        // Pro roster / team / league data is slow-moving but not patch-scoped, so TTL (durable until
+        // its ttlFor horizon) rather than PERMANENT — same reasoning as /schema.
+        if (p.startsWith("/proPlayers") || p.startsWith("/teams") || p.startsWith("/leagues")) {
+            return Classification.TTL;
+        }
         if (p.startsWith("/rankings")) {
             return Classification.TTL;
         }

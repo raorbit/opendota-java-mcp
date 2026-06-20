@@ -3,8 +3,11 @@ package com.raorbit.opendota.config;
 import com.raorbit.opendota.client.OpenDotaClient;
 import com.raorbit.opendota.tools.ExplorerTools;
 import com.raorbit.opendota.tools.HeroTools;
+import com.raorbit.opendota.tools.LeagueTools;
 import com.raorbit.opendota.tools.MatchTools;
 import com.raorbit.opendota.tools.PlayerTools;
+import com.raorbit.opendota.tools.ProTools;
+import com.raorbit.opendota.tools.TeamTools;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -32,9 +35,10 @@ public class McpToolConfig {
 
     @Bean
     ToolCallbackProvider opendotaTools(PlayerTools playerTools, MatchTools matchTools, HeroTools heroTools,
-                                       ExplorerTools explorerTools) {
+                                       ExplorerTools explorerTools, TeamTools teamTools, LeagueTools leagueTools,
+                                       ProTools proTools) {
         return MethodToolCallbackProvider.builder()
-                .toolObjects(playerTools, matchTools, heroTools, explorerTools)
+                .toolObjects(playerTools, matchTools, heroTools, explorerTools, teamTools, leagueTools, proTools)
                 .build();
     }
 }
