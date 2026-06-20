@@ -431,6 +431,10 @@ public final class L2CachingGateway implements AutoCloseable {
         if (p.startsWith("/explorer")) {
             return Classification.NO_STORE;
         }
+        // A parse job's status (GET /request/{jobId}) is volatile and short-lived — never store.
+        if (p.startsWith("/request")) {
+            return Classification.NO_STORE;
+        }
         // /live and everything unrecognised — NO_STORE.
         return Classification.NO_STORE;
     }

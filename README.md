@@ -129,6 +129,22 @@ variables, JVM `-D` flags, or an external `application.properties`):
 | `opendota.rate-limit-permits-per-minute` | `0` | Outbound permits/minute (`0` = tier default: 300 keyed / 60 keyless). When several server processes share one API key, set this to `tier_budget / process_count` so their combined rate stays within OpenDota's real per-key ceiling. |
 | `opendota.sidecar-enabled` | `false` | Forward every OpenDota call to a shared local sidecar instead of calling OpenDota directly — see [Running several agents](#running-several-agents-shared-sidecar). |
 | `opendota.sidecar-host` / `opendota.sidecar-port` | `127.0.0.1` / `31337` | Address of the shared sidecar (used only when `sidecar-enabled` is `true`). |
+| `opendota.write-tools-enabled` | `false` | Register the opt-in write tools — see [Write tools](#write-tools-opt-in). Off by default; the server is read-only unless you set this. |
+
+### Write tools (opt-in)
+
+The server is **read-only by default**. Setting `opendota.write-tools-enabled=true` additionally
+registers three tools that POST to OpenDota to queue work:
+
+| Tool | Endpoint | Effect |
+| --- | --- | --- |
+| `request_parse` | `POST /request/{match_id}` | Queue a full replay parse of a match so its advanced fields become available. Returns a job id. Costs ~10× a normal call. |
+| `get_parse_request` | `GET /request/{job_id}` | Poll the status of a parse job. |
+| `refresh_player` | `POST /players/{account_id}/refresh` | Refresh a player's recent match history from Steam. |
+
+When the flag is unset these tools are not created and never appear in `tools/list`. Writes are
+rate-limited but never cached. (The shared sidecar only proxies `GET`s, so enable write tools on a
+**direct** server rather than a forwarding one.)
 
 ### Running several agents (shared sidecar)
 

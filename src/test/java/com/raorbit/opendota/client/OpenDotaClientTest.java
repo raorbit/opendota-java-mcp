@@ -319,7 +319,45 @@ class OpenDotaClientTest {
         assertThat(client.ttlFor("/records/kills")).isEqualTo(Duration.ofHours(1));
         assertThat(client.ttlFor("/parsedMatches")).isEqualTo(Duration.ofSeconds(60));
         assertThat(client.ttlFor("/metadata")).isEqualTo(Duration.ofMinutes(5));
+        assertThat(client.ttlFor("/request/42")).isEqualTo(Duration.ZERO);
         assertThat(client.ttlFor(null)).isEqualTo(Duration.ofSeconds(30));
+    }
+
+    @Test
+    void postJsonIssuesPostAndReturnsBody() throws Exception {
+        String[] method = {null};
+        server.createContext("/api/request/123", exchange -> {
+            method[0] = exchange.getRequestMethod();
+            respond(exchange, 200, "{\"job\":{\"jobId\":42}}");
+        });
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThat(client.postJson("/request/123")).isEqualTo("{\"job\":{\"jobId\":42}}");
+        assertThat(method[0]).isEqualTo("POST");
+    }
+
+    @Test
+    void postJsonIsNeverCached() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/players/5/refresh", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 200, "{}");
+        });
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        client.postJson("/players/5/refresh");
+        client.postJson("/players/5/refresh");
+        assertThat(hits.get()).isEqualTo(2);   // a POST is never cached or single-flighted
+    }
+
+    @Test
+    void postJsonMapsNon2xxToException() {
+        stub("/api/request/999", 404, "{\"error\":\"Not Found\"}");
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThatThrownBy(() -> client.postJson("/request/999"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(404));
     }
 
     @Test

@@ -255,6 +255,73 @@ public class OpenDotaClient implements AutoCloseable {
     }
 
     /**
+     * Issue a POST to the given API path (no request body) and return the raw response body.
+     *
+     * <p>This is the one write path in an otherwise read-only client: it backs only the opt-in,
+     * flag-gated write tools (parse requests / player refreshes). Unlike {@link #getJson} a POST is
+     * never cached or single-flighted (it is not idempotent in effect), but it is still rate-limited
+     * and has its {@code api_key} / forwarding token applied the same way, and the same key-scrubbing
+     * and response-size cap protect its error path. OpenDota charges {@code POST /request} at roughly
+     * 10x a normal call against the rate limit (each attempt takes a single local permit here).
+     *
+     * @param path the API path beginning with {@code '/'}
+     * @return the raw JSON response body
+     * @throws OpenDotaException on any HTTP error or transport failure
+     */
+    public String postJson(String path) throws OpenDotaException {
+        if (!forwarding) {
+            boolean acquired;
+            try {
+                acquired = rateLimiter.tryAcquire(rateLimitBudget);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new OpenDotaException(0, path, "request interrupted", ie);
+            }
+            if (!acquired) {
+                throw new OpenDotaException(429, path,
+                        "client-side rate limit: no permit within " + rateLimitBudget.toSeconds() + "s");
+            }
+        }
+
+        String url = base + path;
+        if (keyed) {
+            url += (path.indexOf('?') >= 0 ? "&" : "?") + "api_key=" + encode(apiKey);
+        }
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(REQUEST_TIMEOUT)
+                .header("User-Agent", USER_AGENT)
+                .POST(HttpRequest.BodyPublishers.noBody());
+        if (forwardingToken != null) {
+            builder.header(SIDECAR_TOKEN_HEADER, forwardingToken);
+        }
+        HttpRequest request = builder.build();
+
+        try {
+            HttpResponse<String> response = send(request);
+            int status = response.statusCode();
+            String body = response.body();
+            if (status >= 200 && status <= 299) {
+                return body;
+            }
+            String scrubbed = body;
+            if (keyed && scrubbed != null) {
+                scrubbed = scrubbed.replace(apiKey, "REDACTED").replace(encode(apiKey), "REDACTED");
+            }
+            throw new OpenDotaException(status, path, sanitizeUpstream(scrubbed));
+        } catch (IOException e) {
+            if (isResponseTooLarge(e)) {
+                throw new OpenDotaException(0, path,
+                        "upstream response exceeded " + maxResponseBytes + "-byte cap");
+            }
+            throw new OpenDotaException(0, path, "request failed: " + e.getClass().getSimpleName(), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new OpenDotaException(0, path, "request interrupted", e);
+        }
+    }
+
+    /**
      * Fetch a cacheable path with single-flight de-duplication: when several
      * threads miss the same key at once, the first (the leader) performs the one
      * upstream call and the rest await its result, so duplicate requests do not
@@ -576,8 +643,8 @@ public class OpenDotaClient implements AutoCloseable {
             // A team/league's recent-matches feed is rolling; the team/league profile itself moves slowly.
             return p.endsWith("/matches") ? Duration.ofSeconds(60) : Duration.ofHours(1);
         }
-        if (p.startsWith("/live") || p.startsWith("/health")) {
-            // Live game feed / API health snapshot — never cache.
+        if (p.startsWith("/live") || p.startsWith("/health") || p.startsWith("/request")) {
+            // Live game feed / API health snapshot / a parse job's polled status — never cache.
             return Duration.ZERO;
         }
         if (p.startsWith("/records")) {

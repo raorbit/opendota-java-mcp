@@ -9,8 +9,12 @@ import com.raorbit.opendota.tools.MiscTools;
 import com.raorbit.opendota.tools.PlayerTools;
 import com.raorbit.opendota.tools.ProTools;
 import com.raorbit.opendota.tools.TeamTools;
+import com.raorbit.opendota.tools.WriteTools;
+import java.util.ArrayList;
+import java.util.List;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -37,10 +41,15 @@ public class McpToolConfig {
     @Bean
     ToolCallbackProvider opendotaTools(PlayerTools playerTools, MatchTools matchTools, HeroTools heroTools,
                                        ExplorerTools explorerTools, TeamTools teamTools, LeagueTools leagueTools,
-                                       ProTools proTools, MiscTools miscTools) {
+                                       ProTools proTools, MiscTools miscTools,
+                                       ObjectProvider<WriteTools> writeTools) {
+        List<Object> tools = new ArrayList<>(List.of(playerTools, matchTools, heroTools, explorerTools,
+                teamTools, leagueTools, proTools, miscTools));
+        // The write tools are flag-gated: their bean exists only when opendota.write-tools-enabled=true,
+        // so by default this adds nothing and they never appear in tools/list.
+        writeTools.ifAvailable(tools::add);
         return MethodToolCallbackProvider.builder()
-                .toolObjects(playerTools, matchTools, heroTools, explorerTools, teamTools, leagueTools,
-                        proTools, miscTools)
+                .toolObjects(tools.toArray())
                 .build();
     }
 }
