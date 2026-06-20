@@ -491,6 +491,13 @@ class L2CachingGatewayTest {
                 .isEqualTo(com.raorbit.opendota.sidecar.Classification.NO_STORE);
     }
 
+    // ---- M5: a parse job's polled status is volatile — never stored ----
+    @Test
+    void requestStatusIsNoStore() {
+        assertThat(L2CachingGateway.classify("/request/42"))
+                .isEqualTo(com.raorbit.opendota.sidecar.Classification.NO_STORE);
+    }
+
     // ---- Gate 9: cap eviction ----
     @Test
     void capEvictionKeepsCountWithinLimit(@TempDir Path tmp) throws Exception {
