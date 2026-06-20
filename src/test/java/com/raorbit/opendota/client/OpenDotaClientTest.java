@@ -119,6 +119,55 @@ class OpenDotaClientTest {
     }
 
     @Test
+    void transientServerErrorIsRetriedThenSucceeds() throws Exception {
+        // A direct GET is idempotent, so a 5xx is retried with backoff. Fail twice, then succeed.
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/players/123", exchange ->
+                respond(exchange, hits.incrementAndGet() < 3 ? 503 : 200,
+                        hits.get() < 3 ? "{\"error\":\"unavailable\"}" : "{\"ok\":true}"));
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThat(client.getJson("/players/123")).isEqualTo("{\"ok\":true}");
+        assertThat(hits.get()).isEqualTo(3);   // first try + 2 retries
+    }
+
+    @Test
+    void persistentServerErrorIsSurfacedAfterBoundedRetries() throws Exception {
+        // /live is no-store, so each call reaches upstream. A persistent 5xx is retried up to the
+        // bound and then surfaced — not retried forever.
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/live", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 502, "{\"error\":\"bad gateway\"}");
+        });
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThatThrownBy(() -> client.getJson("/live"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(502));
+        assertThat(hits.get()).isEqualTo(3);   // 1 + MAX_UPSTREAM_RETRIES, then give up
+    }
+
+    @Test
+    void clientErrorIsNotRetried() throws Exception {
+        // A 4xx is the client's fault and won't change on retry — surface it after exactly one call.
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/players/777", exchange -> {
+            hits.incrementAndGet();
+            respond(exchange, 404, "{\"error\":\"Not Found\"}");
+        });
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThatThrownBy(() -> client.getJson("/players/777"))
+                .isInstanceOf(OpenDotaException.class)
+                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(404));
+        assertThat(hits.get()).isEqualTo(1);
+    }
+
+    @Test
     void transportFailureYieldsStatusCodeZero() {
         // Stop the server so the port is dead; the connection attempt fails at
         // the transport level, which the client maps to statusCode() == 0.
@@ -172,13 +221,15 @@ class OpenDotaClientTest {
 
     @Test
     void errorResponseIsNotCached() throws Exception {
-        // /players/* is cacheable (30s TTL), but a non-2xx must NOT be cached: a
-        // failing call followed by a retry must re-hit upstream and get the 200.
+        // /players/* is cacheable (30s TTL), but a non-2xx must NOT be cached: after a call that
+        // fails (exhausting its retries on a persistent 5xx) a later call must re-hit upstream and
+        // get the 200 — the failure was never stored.
         String body = "{\"profile\":{\"account_id\":123}}";
         AtomicInteger hits = new AtomicInteger();
         server.createContext("/api/players/123", exchange -> {
+            // The first getJson burns 3 attempts (1 + MAX_UPSTREAM_RETRIES) all 500; then serve 200.
             int n = hits.incrementAndGet();
-            if (n == 1) {
+            if (n <= 3) {
                 respond(exchange, 500, "{\"error\":\"boom\"}");
             } else {
                 respond(exchange, 200, body);
@@ -191,8 +242,9 @@ class OpenDotaClientTest {
                 .isInstanceOf(OpenDotaException.class)
                 .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(500));
 
+        // The 500 was not cached, so the next getJson re-hits upstream (attempt 4) and gets the 200.
         assertThat(client.getJson("/players/123")).isEqualTo(body);
-        assertThat(hits.get()).isEqualTo(2);
+        assertThat(hits.get()).isEqualTo(4);
     }
 
     @Test

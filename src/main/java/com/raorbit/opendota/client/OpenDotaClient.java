@@ -9,6 +9,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodySubscriber;
+import java.net.http.HttpTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -38,6 +39,17 @@ public class OpenDotaClient implements AutoCloseable {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    /**
+     * Extended request timeout for OpenDota's known-slow endpoints (notably {@code /search}, whose
+     * full-text query against the players table is routinely slow and times out at the default).
+     */
+    private static final Duration SLOW_REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    /** Max retries of an idempotent GET after a transient upstream failure (a 5xx, or a fast-endpoint timeout). */
+    private static final int MAX_UPSTREAM_RETRIES = 2;
+    /** Initial backoff between upstream retries (doubles up to the cap). */
+    private static final Duration UPSTREAM_RETRY_BASE_BACKOFF = Duration.ofMillis(250);
+    /** Maximum backoff between upstream retries. */
+    private static final Duration UPSTREAM_RETRY_MAX_BACKOFF = Duration.ofSeconds(1);
     /** Default upper bound on time a request waits for a rate-limit permit. */
     private static final Duration DEFAULT_RATE_LIMIT_BUDGET = Duration.ofSeconds(10);
     /** Default maximum number of cached responses retained before eviction. */
@@ -288,22 +300,6 @@ public class OpenDotaClient implements AutoCloseable {
 
     /** Perform the rate-limited HTTP GET, caching a 2xx body when {@code cacheable}. */
     private String fetch(String path, String cacheKey, Duration ttl, boolean cacheable) throws OpenDotaException {
-        // A forwarding client delegates rate limiting to the sidecar, so it must not
-        // consume a local permit (its own limiter would wrongly throttle the loopback hop).
-        if (!forwarding) {
-            boolean acquired;
-            try {
-                acquired = rateLimiter.tryAcquire(rateLimitBudget);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                throw new OpenDotaException(0, path, "request interrupted", ie);
-            }
-            if (!acquired) {
-                throw new OpenDotaException(429, path,
-                        "client-side rate limit: no permit within " + rateLimitBudget.toSeconds() + "s");
-            }
-        }
-
         String url = base + path;
         if (keyed) {
             // Encode the key so an operator-supplied value containing characters
@@ -311,9 +307,10 @@ public class OpenDotaClient implements AutoCloseable {
             url += (path.indexOf('?') >= 0 ? "&" : "?") + "api_key=" + encode(apiKey);
         }
 
+        Duration requestTimeout = requestTimeoutFor(path);
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(REQUEST_TIMEOUT)
+                .timeout(requestTimeout)
                 .header("User-Agent", USER_AGENT);
         if (forwardingToken != null) {
             // Forwarding client → token-gated sidecar: present the shared secret.
@@ -321,40 +318,109 @@ public class OpenDotaClient implements AutoCloseable {
         }
         HttpRequest request = builder.GET().build();
 
-        try {
-            // A size-capped subscriber (rather than BodyHandlers.ofString) so a
-            // hostile/oversized upstream body cannot exhaust the heap. The body is
-            // still delivered through the client's subscriber pipeline, so the
-            // request timeout continues to bound delivery.
-            HttpResponse<String> response = send(request);
-            int status = response.statusCode();
-            String body = response.body();
-            if (status >= 200 && status <= 299) {
-                if (cacheable && body != null) {
-                    cache.put(cacheKey, body, ttl);
+        // Direct (non-forwarding) GETs are idempotent, so a transient upstream failure is retried a few
+        // times with exponential backoff: a 5xx always, and a timeout/connect drop only on a normally-fast
+        // endpoint. A slow endpoint that already gets the extended timeout is NOT retried on timeout — the
+        // extra time is its resilience; retrying a genuinely-slow query (e.g. /search) just doubles the wait.
+        // Each attempt takes its own rate-limit permit. Forwarding never retries here (its refused-connection
+        // retry lives in send()).
+        boolean slow = requestTimeout.compareTo(REQUEST_TIMEOUT) > 0;
+        int maxAttempts = forwarding ? 1 : 1 + MAX_UPSTREAM_RETRIES;
+        Duration backoff = UPSTREAM_RETRY_BASE_BACKOFF;
+        for (int attempt = 1; ; attempt++) {
+            // A forwarding client delegates rate limiting to the sidecar, so it must not consume a local
+            // permit (its own limiter would wrongly throttle the loopback hop).
+            if (!forwarding) {
+                boolean acquired;
+                try {
+                    acquired = rateLimiter.tryAcquire(rateLimitBudget);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new OpenDotaException(0, path, "request interrupted", ie);
                 }
-                return body;
+                if (!acquired) {
+                    throw new OpenDotaException(429, path,
+                            "client-side rate limit: no permit within " + rateLimitBudget.toSeconds() + "s");
+                }
             }
-            // Scrub the actual key value (raw and URL-encoded) first, so an upstream
-            // that echoes the credential in any shape (not just the api_key= query
-            // form the pattern below covers) cannot leak it; then apply the generic
-            // pattern redaction and length bound before it reaches the error envelope.
-            String scrubbed = body;
-            if (keyed && scrubbed != null) {
-                scrubbed = scrubbed.replace(apiKey, "REDACTED").replace(encode(apiKey), "REDACTED");
+
+            try {
+                // A size-capped subscriber (rather than BodyHandlers.ofString) so a
+                // hostile/oversized upstream body cannot exhaust the heap. The body is
+                // still delivered through the client's subscriber pipeline, so the
+                // request timeout continues to bound delivery.
+                HttpResponse<String> response = send(request);
+                int status = response.statusCode();
+                String body = response.body();
+                if (status >= 200 && status <= 299) {
+                    if (cacheable && body != null) {
+                        cache.put(cacheKey, body, ttl);
+                    }
+                    return body;
+                }
+                // Retry a transient server error (5xx) on a direct GET before surfacing it.
+                if (!forwarding && status >= 500 && status <= 599 && attempt < maxAttempts) {
+                    backoff = retryBackoff(backoff, path);
+                    continue;
+                }
+                // Scrub the actual key value (raw and URL-encoded) first, so an upstream
+                // that echoes the credential in any shape (not just the api_key= query
+                // form the pattern below covers) cannot leak it; then apply the generic
+                // pattern redaction and length bound before it reaches the error envelope.
+                String scrubbed = body;
+                if (keyed && scrubbed != null) {
+                    scrubbed = scrubbed.replace(apiKey, "REDACTED").replace(encode(apiKey), "REDACTED");
+                }
+                throw new OpenDotaException(status, path, sanitizeUpstream(scrubbed));
+            } catch (IOException e) {
+                if (isResponseTooLarge(e)) {
+                    throw new OpenDotaException(0, path,
+                            "upstream response exceeded " + maxResponseBytes + "-byte cap");
+                }
+                // Retry a transient transport failure (timeout/connect) on a direct, non-slow GET.
+                if (!forwarding && !slow && isTransientTransport(e) && attempt < maxAttempts) {
+                    backoff = retryBackoff(backoff, path);
+                    continue;
+                }
+                // Do NOT include the URL/api_key in the message.
+                throw new OpenDotaException(0, path, "request failed: " + e.getClass().getSimpleName(), e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new OpenDotaException(0, path, "request interrupted", e);
             }
-            throw new OpenDotaException(status, path, sanitizeUpstream(scrubbed));
-        } catch (IOException e) {
-            if (isResponseTooLarge(e)) {
-                throw new OpenDotaException(0, path,
-                        "upstream response exceeded " + maxResponseBytes + "-byte cap");
-            }
-            // Do NOT include the URL/api_key in the message.
-            throw new OpenDotaException(0, path, "request failed: " + e.getClass().getSimpleName(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new OpenDotaException(0, path, "request interrupted", e);
         }
+    }
+
+    /** The request timeout for a path: extended for OpenDota's slow endpoints (e.g. {@code /search}). */
+    private static Duration requestTimeoutFor(String path) {
+        if (path == null) {
+            return REQUEST_TIMEOUT;
+        }
+        int q = path.indexOf('?');
+        String p = q >= 0 ? path.substring(0, q) : path;
+        return p.startsWith("/search") ? SLOW_REQUEST_TIMEOUT : REQUEST_TIMEOUT;
+    }
+
+    /** True if {@code t} (or a cause) is a transient transport failure worth retrying an idempotent GET. */
+    private static boolean isTransientTransport(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof HttpTimeoutException || c instanceof ConnectException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Sleep the current backoff (interrupt-aware), returning the next (doubled, capped) backoff. */
+    private Duration retryBackoff(Duration backoff, String path) throws OpenDotaException {
+        try {
+            Thread.sleep(backoff.toMillis());
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new OpenDotaException(0, path, "request interrupted", ie);
+        }
+        Duration next = backoff.multipliedBy(2);
+        return next.compareTo(UPSTREAM_RETRY_MAX_BACKOFF) > 0 ? UPSTREAM_RETRY_MAX_BACKOFF : next;
     }
 
     /**
