@@ -240,6 +240,53 @@ public class PlayerTools {
         return get(sb.toString());
     }
 
+    @Tool(name = "get_player_ratings",
+            description = "MMR rating history (rating over time) for a Steam32 account_id.")
+    public String getPlayerRatings(long account_id) {
+        return get("/players/" + account_id + "/ratings");
+    }
+
+    @Tool(name = "get_player_rankings",
+            description = "Per-hero ranking percentiles for a Steam32 account_id (how the player ranks on each hero).")
+    public String getPlayerRankings(long account_id) {
+        return get("/players/" + account_id + "/rankings");
+    }
+
+    @Tool(name = "get_player_counts",
+            description = "Counts of a Steam32 account_id's matches grouped by category "
+                    + "(game mode, lobby type, lane role, region, patch, etc.).")
+    public String getPlayerCounts(long account_id) {
+        return get("/players/" + account_id + "/counts");
+    }
+
+    @Tool(name = "get_player_histograms",
+            description = "Distribution (histogram) of a single match stat for a Steam32 account_id. The field is a "
+                    + "match stat name, e.g. kills, deaths, assists, gold_per_min, xp_per_min, last_hits, duration.")
+    public String getPlayerHistograms(long account_id, String field) {
+        if (field == null || field.isBlank()) {
+            return ToolResults.badArg("/players/histograms", "field is required");
+        }
+        return get("/players/" + account_id + "/histograms/" + OpenDotaClient.encode(field));
+    }
+
+    @Tool(name = "get_player_pros",
+            description = "Professional players a Steam32 account_id has played with or against.")
+    public String getPlayerPros(long account_id) {
+        return get("/players/" + account_id + "/pros");
+    }
+
+    @Tool(name = "get_player_wardmap",
+            description = "Observer/sentry ward placement heatmap data for a Steam32 account_id.")
+    public String getPlayerWardmap(long account_id) {
+        return get("/players/" + account_id + "/wardmap");
+    }
+
+    @Tool(name = "get_player_wordcloud",
+            description = "Frequencies of chat words used by a Steam32 account_id (a word-cloud data source).")
+    public String getPlayerWordcloud(long account_id) {
+        return get("/players/" + account_id + "/wordcloud");
+    }
+
     /** GET {@code path}, passing the raw body through or mapping a failure to the error envelope. */
     private String get(String path) {
         try {
