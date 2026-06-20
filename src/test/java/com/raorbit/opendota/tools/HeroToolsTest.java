@@ -46,7 +46,7 @@ class HeroToolsTest {
         when(client.getJson(anyString())).thenReturn("[]");
         HeroTools tools = new HeroTools(client);
 
-        tools.getHeroRankings("14");
+        tools.getHeroRankings(14);
 
         ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
         verify(client).getJson(path.capture());
@@ -72,7 +72,7 @@ class HeroToolsTest {
         when(client.getJson(anyString())).thenReturn("{}");
         HeroTools tools = new HeroTools(client);
 
-        tools.getBenchmarks("14");
+        tools.getBenchmarks(14);
 
         ArgumentCaptor<String> path = ArgumentCaptor.forClass(String.class);
         verify(client).getJson(path.capture());
@@ -80,11 +80,11 @@ class HeroToolsTest {
     }
 
     @Test
-    void getBenchmarksWithBlankReturnsBadArgWithoutCallingClient() throws Exception {
+    void getBenchmarksWithNullReturnsBadArgWithoutCallingClient() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         HeroTools tools = new HeroTools(client);
 
-        String result = tools.getBenchmarks("  ");
+        String result = tools.getBenchmarks(null);
 
         assertThat(result)
                 .contains("\"isError\":true")
@@ -127,7 +127,7 @@ class HeroToolsTest {
                 .thenThrow(new OpenDotaException(429, "/rankings?hero_id=14", "rate limited"));
         HeroTools tools = new HeroTools(client);
 
-        String result = tools.getHeroRankings("14");
+        String result = tools.getHeroRankings(14);
 
         assertThat(result)
                 .contains("\"isError\":true")

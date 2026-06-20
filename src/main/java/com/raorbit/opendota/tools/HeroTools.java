@@ -46,11 +46,11 @@ public class HeroTools {
     }
 
     @Tool(name = "get_hero_rankings", description = "Top-ranked players for a given hero_id.")
-    public String getHeroRankings(String hero_id) {
-        if (hero_id == null || hero_id.isBlank()) {
+    public String getHeroRankings(Integer hero_id) {
+        if (hero_id == null) {
             return ToolResults.badArg("/rankings", "hero_id is required");
         }
-        String path = "/rankings?hero_id=" + OpenDotaClient.encode(hero_id);
+        String path = "/rankings?hero_id=" + hero_id;
         try {
             return client.getJson(path);
         } catch (OpenDotaException e) {
@@ -62,11 +62,11 @@ public class HeroTools {
 
     @Tool(name = "get_benchmarks",
             description = "Percentile benchmarks (GPM, XPM, kills, last hits, etc.) for a given hero_id over recent matches.")
-    public String getBenchmarks(String hero_id) {
-        if (hero_id == null || hero_id.isBlank()) {
+    public String getBenchmarks(Integer hero_id) {
+        if (hero_id == null) {
             return ToolResults.badArg("/benchmarks", "hero_id is required");
         }
-        String path = "/benchmarks?hero_id=" + OpenDotaClient.encode(hero_id);
+        String path = "/benchmarks?hero_id=" + hero_id;
         try {
             return client.getJson(path);
         } catch (OpenDotaException e) {
