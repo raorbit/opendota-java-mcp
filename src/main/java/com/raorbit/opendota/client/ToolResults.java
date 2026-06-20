@@ -1,5 +1,8 @@
 package com.raorbit.opendota.client;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * Helpers for building the JSON error envelopes returned to MCP clients.
  *
@@ -10,6 +13,7 @@ package com.raorbit.opendota.client;
 public final class ToolResults {
 
     private static final char[] HEX = "0123456789abcdef".toCharArray();
+    private static final Logger log = LoggerFactory.getLogger(ToolResults.class);
 
     private ToolResults() {
     }
@@ -46,6 +50,17 @@ public final class ToolResults {
     public static String internalError(String endpoint) {
         return "{\"error\":\"internal error\",\"status\":500,\"endpoint\":\""
                 + escape(endpoint) + "\",\"isError\":true}";
+    }
+
+    /**
+     * Like {@link #internalError(String)} but first logs {@code t} at WARN (to the file log — never
+     * stdout, which carries the MCP transport). The client still gets the identical envelope, so the
+     * throwable is never surfaced; this only ensures an unexpected failure leaves a trace, since
+     * console logging is off and a tool's {@code catch (RuntimeException)} would otherwise discard it.
+     */
+    public static String internalError(String endpoint, Throwable t) {
+        log.warn("internal error handling {}", endpoint, t);
+        return internalError(endpoint);
     }
 
     /**

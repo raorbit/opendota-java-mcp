@@ -55,7 +55,7 @@ public class PlayerTools {
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
         } catch (RuntimeException e) {
-            return ToolResults.internalError(path);
+            return ToolResults.internalError(path, e);
         }
     }
 
@@ -68,7 +68,7 @@ public class PlayerTools {
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
         } catch (RuntimeException e) {
-            return ToolResults.internalError(path);
+            return ToolResults.internalError(path, e);
         }
     }
 
@@ -294,7 +294,7 @@ public class PlayerTools {
         } catch (OpenDotaException e) {
             return ToolResults.fromException(e);
         } catch (RuntimeException e) {
-            return ToolResults.internalError(path);
+            return ToolResults.internalError(path, e);
         }
     }
 
