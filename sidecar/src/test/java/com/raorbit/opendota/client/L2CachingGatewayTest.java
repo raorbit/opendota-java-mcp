@@ -468,6 +468,7 @@ class L2CachingGatewayTest {
         String[] ttlPaths = {
                 "/players/123", "/proMatches", "/publicMatches", "/rankings",
                 "/search?q=x", "/benchmarks?hero_id=1", "/distributions", "/heroes/14/matches",
+                "/schema",
         };
         try (OpenDotaClient client = new CountingClient()) {
             for (String path : ttlPaths) {
@@ -479,6 +480,13 @@ class L2CachingGatewayTest {
                         .isPositive();
             }
         }
+    }
+
+    // ---- M1: ad-hoc SQL /explorer is never stored (200s even on a SQL error; unique per query) ----
+    @Test
+    void explorerIsNoStore() {
+        assertThat(L2CachingGateway.classify("/explorer?sql=SELECT+1"))
+                .isEqualTo(com.raorbit.opendota.sidecar.Classification.NO_STORE);
     }
 
     // ---- Gate 9: cap eviction ----
