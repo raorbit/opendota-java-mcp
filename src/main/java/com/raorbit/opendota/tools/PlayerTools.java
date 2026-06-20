@@ -170,9 +170,14 @@ public class PlayerTools {
     }
 
     @Tool(name = "get_player_heroes",
-            description = "Per-hero stats for a Steam32 account_id, with optional filters.")
+            description = "Per-hero stats (games, win rate, etc.) for a Steam32 account_id, aggregated "
+                    + "across the player's matches. Returns a row for EVERY hero, not a top-N list.")
     public String getPlayerHeroes(long account_id,
-                                  @ToolParam(required = false) Integer limit,
+                                  @ToolParam(required = false,
+                                          description = "Only aggregate over the player's most recent N matches "
+                                                  + "(it caps the matches considered, NOT the number of heroes "
+                                                  + "returned — the response still covers all heroes).")
+                                  Integer limit,
                                   @ToolParam(required = false) Integer date) {
         StringBuilder sb = new StringBuilder("/players/").append(account_id).append("/heroes");
         boolean[] started = {false};
