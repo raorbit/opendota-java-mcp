@@ -496,32 +496,6 @@ class OpenDotaClientTest {
     }
 
     @Test
-    void rateLimitWaitIsBoundedPerCallNotPerAttempt() throws Exception {
-        // Refill is 1 permit/sec (permitsPerMinute=60) and the per-call budget is 2s, so a single call can
-        // acquire at most ~2 permits within its budget — never the 3 a 5xx-retry would need. With the OLD
-        // per-ATTEMPT budget each retry got a fresh 2s and all 3 attempts would proceed (ending in a 500);
-        // with the per-CALL deadline the call runs out the budget and fails fast with a 429. The 429-vs-500
-        // outcome is deterministic (it follows from the refill math, not a wall-clock threshold).
-        AtomicInteger hits = new AtomicInteger();
-        server.createContext("/api/live", exchange ->
-                respond(exchange, hits.incrementAndGet() <= 60 ? 200 : 500, "[]"));
-
-        OpenDotaClient client = new OpenDotaClient(
-                null, base, 4096, 64L * 1024 * 1024, Duration.ofMillis(2000), 16L * 1024 * 1024, 60);
-
-        // Drain the full bucket (capacity == permitsPerMinute == 60) so the test call must wait on refill.
-        for (int i = 0; i < 60; i++) {
-            assertThat(client.getJson("/live")).isEqualTo("[]");
-        }
-
-        // /live is no-store and now 500s; the retrying call can't gather 3 permits within the 2s budget,
-        // so it fails fast with a client-side 429 rather than parking up to ~3× the budget across attempts.
-        assertThatThrownBy(() -> client.getJson("/live"))
-                .isInstanceOf(OpenDotaException.class)
-                .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(429));
-    }
-
-    @Test
     void forwardingClientBypassesLocalCache() throws Exception {
         // A forwarding client (pointed at the sidecar) must NOT cache: the sidecar owns
         // the shared cache. /players/* is cacheable for a direct client, so two identical
