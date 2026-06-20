@@ -294,6 +294,8 @@ class OpenDotaClientTest {
         OpenDotaClient client = new OpenDotaClient(null, base);
         assertThat(client.ttlFor("/live")).isEqualTo(Duration.ZERO);
         assertThat(client.ttlFor("/heroes")).isEqualTo(Duration.ofHours(6));
+        // The /heroes/{id}/* deep-dives are rolling aggregates — a short horizon, NOT the 6h list TTL.
+        assertThat(client.ttlFor("/heroes/44/matchups")).isEqualTo(Duration.ofSeconds(60));
         assertThat(client.ttlFor("/constants/items")).isEqualTo(Duration.ofHours(6));
         assertThat(client.ttlFor("/heroStats")).isEqualTo(Duration.ofHours(1));
         assertThat(client.ttlFor("/benchmarks?hero_id=1")).isEqualTo(Duration.ofHours(1));

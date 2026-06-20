@@ -535,6 +535,12 @@ public class OpenDotaClient implements AutoCloseable {
             // data, so it shares the longer static-ish horizon rather than 60s.
             return Duration.ofHours(1);
         }
+        if (p.startsWith("/heroes/")) {
+            // /heroes/{id}/* (matchups, durations, itemPopularity, players, matches) are rolling
+            // aggregates over recent matches — far more volatile than the static /heroes list, so a
+            // short horizon. MUST precede the bare /heroes check below (which would else swallow these).
+            return Duration.ofSeconds(60);
+        }
         if (p.startsWith("/heroes")) {
             return Duration.ofHours(6);
         }

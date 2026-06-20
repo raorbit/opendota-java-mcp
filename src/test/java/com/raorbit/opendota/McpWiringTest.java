@@ -39,7 +39,9 @@ class McpWiringTest {
                 "get_player_matches", "get_player_heroes",
                 "get_match", "get_pro_matches", "get_public_matches", "get_live_games",
                 "list_heroes", "get_hero_stats", "get_hero_rankings", "get_constants",
-                "run_sql_explorer", "get_sql_schema");
+                "run_sql_explorer", "get_sql_schema",
+                "get_hero_matchups", "get_hero_item_popularity", "get_hero_durations",
+                "get_hero_players", "get_hero_matches");
     }
 
     @Test
