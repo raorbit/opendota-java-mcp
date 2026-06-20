@@ -1,6 +1,7 @@
 package com.raorbit.opendota.config;
 
 import com.raorbit.opendota.client.OpenDotaClient;
+import com.raorbit.opendota.tools.ExplorerTools;
 import com.raorbit.opendota.tools.HeroTools;
 import com.raorbit.opendota.tools.MatchTools;
 import com.raorbit.opendota.tools.PlayerTools;
@@ -30,9 +31,10 @@ public class McpToolConfig {
     }
 
     @Bean
-    ToolCallbackProvider opendotaTools(PlayerTools playerTools, MatchTools matchTools, HeroTools heroTools) {
+    ToolCallbackProvider opendotaTools(PlayerTools playerTools, MatchTools matchTools, HeroTools heroTools,
+                                       ExplorerTools explorerTools) {
         return MethodToolCallbackProvider.builder()
-                .toolObjects(playerTools, matchTools, heroTools)
+                .toolObjects(playerTools, matchTools, heroTools, explorerTools)
                 .build();
     }
 }
