@@ -33,6 +33,18 @@ public class LeagueTools {
         return get("/leagues/" + league_id + "/matches");
     }
 
+    @Tool(name = "get_leagues",
+            description = "List of all leagues/tournaments OpenDota knows about (league_id, name, tier).")
+    public String getLeagues() {
+        return get("/leagues");
+    }
+
+    @Tool(name = "get_league_teams",
+            description = "Teams that competed in a given league_id, with their win/loss and rating.")
+    public String getLeagueTeams(long league_id) {
+        return get("/leagues/" + league_id + "/teams");
+    }
+
     /** GET {@code path}, passing the raw body through or mapping a failure to the error envelope. */
     private String get(String path) {
         try {

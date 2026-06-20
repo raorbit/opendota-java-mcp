@@ -201,7 +201,7 @@ public class PlayerTools {
                 lane_role, hero_id, is_radiant, included_account_id, excluded_account_id, with_hero_id,
                 against_hero_id, significant, having, sort);
         // `project` is matches-only: a repeatable query key expanded one project=<field> per token.
-        appendRepeated(sb, started, "project", project);
+        Query.appendRepeated(sb, started, "project", project);
         return get(sb.toString());
     }
 
@@ -299,10 +299,9 @@ public class PlayerTools {
     }
 
     /**
-     * Append the canonical OpenDota player filter set to {@code sb}. Scalars go through
-     * {@link #appendParam} (skipped when null); the array-valued filters go through
-     * {@link #appendRepeated} (comma-separated string → repeated query keys). All endpoints that
-     * share this set accept every key, so they can be applied uniformly.
+     * Append the canonical OpenDota player filter set to {@code sb} via {@link Query}. Scalars are
+     * skipped when null; the array-valued filters are comma-separated strings expanded into repeated
+     * query keys. All endpoints that share this set accept every key, so it is applied uniformly.
      */
     private static void appendFilters(StringBuilder sb, boolean[] started,
                                       Integer limit, Integer offset, Integer win, Integer patch,
@@ -311,54 +310,23 @@ public class PlayerTools {
                                       String included_account_id, String excluded_account_id,
                                       String with_hero_id, String against_hero_id,
                                       Integer significant, Integer having, String sort) {
-        appendParam(sb, started, "limit", limit);
-        appendParam(sb, started, "offset", offset);
-        appendParam(sb, started, "win", win);
-        appendParam(sb, started, "patch", patch);
-        appendParam(sb, started, "game_mode", game_mode);
-        appendParam(sb, started, "lobby_type", lobby_type);
-        appendParam(sb, started, "region", region);
-        appendParam(sb, started, "date", date);
-        appendParam(sb, started, "lane_role", lane_role);
-        appendParam(sb, started, "hero_id", hero_id);
-        appendParam(sb, started, "is_radiant", is_radiant);
-        appendRepeated(sb, started, "included_account_id", included_account_id);
-        appendRepeated(sb, started, "excluded_account_id", excluded_account_id);
-        appendRepeated(sb, started, "with_hero_id", with_hero_id);
-        appendRepeated(sb, started, "against_hero_id", against_hero_id);
-        appendParam(sb, started, "significant", significant);
-        appendParam(sb, started, "having", having);
-        appendParam(sb, started, "sort", sort);
-    }
-
-    /**
-     * Append {@code name=value} to the query string only when {@code value != null},
-     * using {@code '?'} for the first parameter and {@code '&'} thereafter. The value
-     * is URL-encoded via {@link OpenDotaClient#encode(String)}.
-     */
-    private static void appendParam(StringBuilder sb, boolean[] started, String name, Object value) {
-        if (value == null) {
-            return;
-        }
-        sb.append(started[0] ? '&' : '?');
-        started[0] = true;
-        sb.append(name).append('=').append(OpenDotaClient.encode(String.valueOf(value)));
-    }
-
-    /**
-     * Append a repeatable query parameter once per non-blank comma-separated token in
-     * {@code csv} (e.g. {@code "kills,deaths"} → {@code project=kills&project=deaths}),
-     * which is how OpenDota expects array-valued query params. A {@code null} csv is skipped.
-     */
-    private static void appendRepeated(StringBuilder sb, boolean[] started, String name, String csv) {
-        if (csv == null) {
-            return;
-        }
-        for (String token : csv.split(",")) {
-            String t = token.trim();
-            if (!t.isEmpty()) {
-                appendParam(sb, started, name, t);
-            }
-        }
+        Query.append(sb, started, "limit", limit);
+        Query.append(sb, started, "offset", offset);
+        Query.append(sb, started, "win", win);
+        Query.append(sb, started, "patch", patch);
+        Query.append(sb, started, "game_mode", game_mode);
+        Query.append(sb, started, "lobby_type", lobby_type);
+        Query.append(sb, started, "region", region);
+        Query.append(sb, started, "date", date);
+        Query.append(sb, started, "lane_role", lane_role);
+        Query.append(sb, started, "hero_id", hero_id);
+        Query.append(sb, started, "is_radiant", is_radiant);
+        Query.appendRepeated(sb, started, "included_account_id", included_account_id);
+        Query.appendRepeated(sb, started, "excluded_account_id", excluded_account_id);
+        Query.appendRepeated(sb, started, "with_hero_id", with_hero_id);
+        Query.appendRepeated(sb, started, "against_hero_id", against_hero_id);
+        Query.append(sb, started, "significant", significant);
+        Query.append(sb, started, "having", having);
+        Query.append(sb, started, "sort", sort);
     }
 }

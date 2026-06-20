@@ -28,6 +28,13 @@ public class ProTools {
         return get("/proPlayers");
     }
 
+    @Tool(name = "get_top_players",
+            description = "Highest-rated players by estimated MMR (the top of the public ladder). Distinct from "
+                    + "get_pro_players, which lists known professionals regardless of current MMR.")
+    public String getTopPlayers() {
+        return get("/topPlayers");
+    }
+
     /** GET {@code path}, passing the raw body through or mapping a failure to the error envelope. */
     private String get(String path) {
         try {

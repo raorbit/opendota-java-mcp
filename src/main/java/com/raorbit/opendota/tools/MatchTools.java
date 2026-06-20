@@ -38,9 +38,10 @@ public class MatchTools {
     @Tool(name = "get_pro_matches",
             description = "Recent professional matches; paginate with less_than_match_id.")
     public String getProMatches(@ToolParam(required = false) Long less_than_match_id) {
-        QueryBuilder qb = new QueryBuilder("/proMatches");
-        qb.append("less_than_match_id", less_than_match_id);
-        String path = qb.build();
+        StringBuilder sb = new StringBuilder("/proMatches");
+        boolean[] started = {false};
+        Query.append(sb, started, "less_than_match_id", less_than_match_id);
+        String path = sb.toString();
         try {
             return client.getJson(path);
         } catch (OpenDotaException e) {
@@ -57,11 +58,12 @@ public class MatchTools {
     public String getPublicMatches(@ToolParam(required = false) Long less_than_match_id,
                                    @ToolParam(required = false) Integer min_rank,
                                    @ToolParam(required = false) Integer max_rank) {
-        QueryBuilder qb = new QueryBuilder("/publicMatches");
-        qb.append("less_than_match_id", less_than_match_id);
-        qb.append("min_rank", min_rank);
-        qb.append("max_rank", max_rank);
-        String path = qb.build();
+        StringBuilder sb = new StringBuilder("/publicMatches");
+        boolean[] started = {false};
+        Query.append(sb, started, "less_than_match_id", less_than_match_id);
+        Query.append(sb, started, "min_rank", min_rank);
+        Query.append(sb, started, "max_rank", max_rank);
+        String path = sb.toString();
         try {
             return client.getJson(path);
         } catch (OpenDotaException e) {
@@ -81,39 +83,6 @@ public class MatchTools {
             return ToolResults.fromException(e);
         } catch (RuntimeException e) {
             return ToolResults.internalError(path, e);
-        }
-    }
-
-    /**
-     * Accumulates query parameters onto a base path, appending each only when
-     * its value is non-null. The first appended param uses {@code '?'} and the
-     * rest use {@code '&'}. Values are URL-encoded so the helper can never become
-     * a query-injection sink: today's callers pass only numeric values (left
-     * byte-for-byte unchanged by the encoder), but a future non-numeric parameter
-     * is then automatically safe.
-     *
-     * <p>Package-private (not {@code private}) so its encoding can be unit-tested directly.
-     */
-    static final class QueryBuilder {
-
-        private final StringBuilder sb;
-        private boolean first = true;
-
-        QueryBuilder(String basePath) {
-            this.sb = new StringBuilder(basePath);
-        }
-
-        void append(String name, Object value) {
-            if (value == null) {
-                return;
-            }
-            sb.append(first ? '?' : '&').append(name).append('=')
-                    .append(OpenDotaClient.encode(String.valueOf(value)));
-            first = false;
-        }
-
-        String build() {
-            return sb.toString();
         }
     }
 }
