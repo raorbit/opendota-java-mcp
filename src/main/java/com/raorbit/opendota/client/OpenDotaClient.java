@@ -568,6 +568,14 @@ public class OpenDotaClient implements AutoCloseable {
         if (p.startsWith("/proMatches") || p.startsWith("/publicMatches")) {
             return Duration.ofSeconds(45);
         }
+        if (p.startsWith("/proPlayers")) {
+            // The pro-player roster moves slowly (roster changes, not live data).
+            return Duration.ofHours(6);
+        }
+        if (p.startsWith("/teams") || p.startsWith("/leagues")) {
+            // A team/league's recent-matches feed is rolling; the team/league profile itself moves slowly.
+            return p.endsWith("/matches") ? Duration.ofSeconds(60) : Duration.ofHours(1);
+        }
         if (p.startsWith("/live")) {
             return Duration.ZERO;
         }

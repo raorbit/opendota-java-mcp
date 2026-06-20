@@ -310,6 +310,11 @@ class OpenDotaClientTest {
         assertThat(client.ttlFor("/rankings?hero_id=1")).isEqualTo(Duration.ofSeconds(15));
         assertThat(client.ttlFor("/schema")).isEqualTo(Duration.ofHours(24));
         assertThat(client.ttlFor("/explorer?sql=SELECT+1")).isEqualTo(Duration.ZERO);
+        assertThat(client.ttlFor("/proPlayers")).isEqualTo(Duration.ofHours(6));
+        assertThat(client.ttlFor("/teams/15")).isEqualTo(Duration.ofHours(1));
+        assertThat(client.ttlFor("/teams/15/matches")).isEqualTo(Duration.ofSeconds(60));
+        assertThat(client.ttlFor("/leagues/4210")).isEqualTo(Duration.ofHours(1));
+        assertThat(client.ttlFor("/leagues/4210/matches")).isEqualTo(Duration.ofSeconds(60));
         assertThat(client.ttlFor(null)).isEqualTo(Duration.ofSeconds(30));
     }
 
