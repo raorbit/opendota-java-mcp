@@ -386,6 +386,11 @@ public final class L2CachingGateway implements AutoCloseable {
             return Classification.PERMANENT;
         }
         // Volatile feeds — TTL (durably stored with expires_at = now + ttlFor(path)).
+        if (p.startsWith("/schema")) {
+            // The /explorer SQL schema is near-static but not patch-scoped, so TTL (24h horizon via
+            // ttlFor) rather than PERMANENT — durable across restarts without pinning a stale schema.
+            return Classification.TTL;
+        }
         if (p.startsWith("/players/")) {
             return Classification.TTL;
         }
@@ -410,6 +415,11 @@ public final class L2CachingGateway implements AutoCloseable {
         }
         if (p.startsWith("/distributions")) {
             return Classification.TTL;
+        }
+        // Ad-hoc SQL: unique per query and 200s even on a SQL error — never store. (Explicit rather
+        // than via the default below so a future reorder can't accidentally make it cacheable.)
+        if (p.startsWith("/explorer")) {
+            return Classification.NO_STORE;
         }
         // /live and everything unrecognised — NO_STORE.
         return Classification.NO_STORE;

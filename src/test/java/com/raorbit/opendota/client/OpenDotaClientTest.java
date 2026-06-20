@@ -306,6 +306,8 @@ class OpenDotaClientTest {
         assertThat(client.ttlFor("/publicMatches?min_rank=70")).isEqualTo(Duration.ofSeconds(45));
         assertThat(client.ttlFor("/search?q=abc")).isEqualTo(Duration.ofSeconds(15));
         assertThat(client.ttlFor("/rankings?hero_id=1")).isEqualTo(Duration.ofSeconds(15));
+        assertThat(client.ttlFor("/schema")).isEqualTo(Duration.ofHours(24));
+        assertThat(client.ttlFor("/explorer?sql=SELECT+1")).isEqualTo(Duration.ZERO);
         assertThat(client.ttlFor(null)).isEqualTo(Duration.ofSeconds(30));
     }
 

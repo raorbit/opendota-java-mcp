@@ -391,14 +391,17 @@ public class OpenDotaClient implements AutoCloseable {
         }
     }
 
-    /** The request timeout for a path: extended for OpenDota's slow endpoints (e.g. {@code /search}). */
+    /**
+     * The request timeout for a path: extended for OpenDota's slow endpoints — {@code /search}'s
+     * full-text query and {@code /explorer}'s ad-hoc SQL both routinely exceed the default.
+     */
     private static Duration requestTimeoutFor(String path) {
         if (path == null) {
             return REQUEST_TIMEOUT;
         }
         int q = path.indexOf('?');
         String p = q >= 0 ? path.substring(0, q) : path;
-        return p.startsWith("/search") ? SLOW_REQUEST_TIMEOUT : REQUEST_TIMEOUT;
+        return p.startsWith("/search") || p.startsWith("/explorer") ? SLOW_REQUEST_TIMEOUT : REQUEST_TIMEOUT;
     }
 
     /** True if {@code t} (or a cause) is a transient transport failure worth retrying an idempotent GET. */
@@ -545,6 +548,16 @@ public class OpenDotaClient implements AutoCloseable {
         if (p.startsWith("/distributions")) {
             // MMR/rank distributions across the player base; change very slowly.
             return Duration.ofHours(6);
+        }
+        if (p.startsWith("/schema")) {
+            // The /explorer SQL schema (table/column listing) is near-static reference data.
+            return Duration.ofHours(24);
+        }
+        if (p.startsWith("/explorer")) {
+            // Ad-hoc SQL: each distinct query is a unique cache key, and /explorer returns HTTP 200
+            // even on a SQL error ({err} in the body) — caching would pin those error bodies.
+            // Uncacheable (Duration.ZERO also disables single-flight for it).
+            return Duration.ZERO;
         }
         if (p.startsWith("/proMatches") || p.startsWith("/publicMatches")) {
             return Duration.ofSeconds(45);
