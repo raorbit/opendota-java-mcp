@@ -11,44 +11,118 @@ The server is a Spring Boot application that registers a set of MCP tools, each
 backed by a `GET` request to the public OpenDota REST API
 (`https://api.opendota.com/api`). Tool methods are plain Java methods annotated
 with `org.springframework.ai.tool.annotation.@Tool` and exposed through a
-`ToolCallbackProvider` bean (built with `MethodToolCallbackProvider`). All
-responses are returned as raw JSON strings straight from OpenDota.
+`ToolCallbackProvider` bean (built with `MethodToolCallbackProvider`). Almost all
+responses are returned as raw JSON strings straight from OpenDota — the one
+exception is `run_sql_explorer`, which slims OpenDota's verbose `/explorer` result
+down to `{command, rowCount, fields, rows, sql_executed}`.
 
 The build produces a single runnable Spring Boot jar
-(`target/opendota-mcp-1.0.0.jar`) that MCP clients launch via `java -jar`.
+(`target/opendota-mcp-1.1.0.jar`) that MCP clients launch via `java -jar`.
 
 ## Tools
 
-The server exposes 14 tools in three groups.
+The server exposes **50 tools**: 47 read-only `GET` wrappers (always on) plus 3
+opt-in **write** tools (off unless `opendota.write-tools-enabled=true`).
 
 ### Player
 
 | Tool | Description |
 | --- | --- |
 | `search_players` | Search players by name, returning matching `account_id`s. |
-| `get_player` | Get a player's profile, rank, and estimated MMR. |
-| `get_player_wl` | Get a player's win/loss record. |
-| `get_player_recent_matches` | Get a player's ~20 most recent matches (no filters). |
-| `get_player_matches` | Get a player's match history with filters and paging. |
-| `get_player_heroes` | Get a player's per-hero statistics. |
+| `get_player` | A player's profile, rank, and estimated MMR. |
+| `get_player_wl` | Win/loss record (accepts the full filter set). |
+| `get_player_recent_matches` | The ~20 most recent matches (no filters). |
+| `get_player_matches` | Match history with the full filter set and paging. |
+| `get_player_heroes` | Per-hero stats — a row per hero (accepts the full filter set). |
+| `get_player_peers` | Teammates played with most, with win rates. |
+| `get_player_totals` | Career totals/averages (kills, GPM, XPM, …). |
+| `get_player_ratings` | MMR rating history over time. |
+| `get_player_rankings` | Per-hero ranking percentiles. |
+| `get_player_counts` | Match counts grouped by category (mode, lane, region, …). |
+| `get_player_histograms` | Distribution of a single match stat (by `field`). |
+| `get_player_pros` | Pro players this account has played with/against. |
+| `get_player_wardmap` | Ward-placement heatmap data. |
+| `get_player_wordcloud` | Chat-word frequencies. |
+
+The four aggregation tools (`get_player_wl`, `get_player_peers`,
+`get_player_totals`, `get_player_heroes`) and `get_player_matches` share the full
+OpenDota filter set (`win`, `hero_id`, `lane_role`, `patch`, `date`, `region`,
+`significant`, `sort`, …). The array filters (`included_account_id`,
+`excluded_account_id`, `with_hero_id`, `against_hero_id`) are **comma-separated
+strings**, expanded into repeated query params.
 
 ### Match
 
 | Tool | Description |
 | --- | --- |
-| `get_match` | Get full detail for a match (advanced fields are null for unparsed matches). |
-| `get_pro_matches` | Get recent professional matches (paginate via `less_than_match_id`). |
-| `get_public_matches` | Get recent public matches with an optional rank window (10-15 Herald .. 80 Immortal). |
-| `get_live_games` | Get games that are currently live. |
+| `get_match` | Full detail for a match (advanced fields are null for unparsed matches). |
+| `get_pro_matches` | Recent professional matches (paginate via `less_than_match_id`). |
+| `get_public_matches` | Recent public matches with an optional rank window (10-15 Herald .. 80 Immortal). |
+| `get_live_games` | Games that are currently live. |
 
-### Hero / static
+### Hero
 
 | Tool | Description |
 | --- | --- |
 | `list_heroes` | List all heroes. |
-| `get_hero_stats` | Get hero pick / win / ban rates by skill tier. |
-| `get_hero_rankings` | Get the top-ranked players for a given `hero_id`. |
-| `get_constants` | Get game constants by resource name. |
+| `get_hero_stats` | Hero pick / win / ban rates by skill tier. |
+| `get_hero_rankings` | Top-ranked players for a `hero_id` (integer). |
+| `get_benchmarks` | Percentile benchmarks (GPM, XPM, …) for a `hero_id` (integer). |
+| `get_hero_matchups` | How a hero fares vs every other hero — counter-pick data. |
+| `get_hero_item_popularity` | Item builds by game phase, from pro games. |
+| `get_hero_durations` | Win rate bucketed by match length. |
+| `get_hero_players` | Players who have played the hero. |
+| `get_hero_matches` | Recent pro matches featuring the hero. |
+| `get_distributions` | MMR / rank / country distributions across the player base. |
+| `get_constants` | Static game constants by resource name. |
+
+### SQL analytics
+
+| Tool | Description |
+| --- | --- |
+| `run_sql_explorer` | Run a guarded read-only SQL query against OpenDota's `/explorer` data warehouse, for analytical questions the fixed endpoints can't answer. `SELECT`/`WITH` only; a row `LIMIT` is enforced; the result is slimmed to `{command, rowCount, fields, rows, sql_executed}`. |
+| `get_sql_schema` | List the tables/columns available to `run_sql_explorer`. |
+
+### Teams & leagues
+
+| Tool | Description |
+| --- | --- |
+| `get_teams` | Professional teams ranked by rating (paginated via `page`). |
+| `get_team` | A team's profile (name, tag, rating, W/L) by `team_id`. |
+| `get_team_matches` | Recent matches played by a `team_id`. |
+| `get_team_players` | Players who have played for a `team_id`. |
+| `get_team_heroes` | Heroes a `team_id` has drafted. |
+| `get_leagues` | List of all leagues / tournaments. |
+| `get_league` | A league's info by `league_id`. |
+| `get_league_matches` | Matches played in a `league_id`. |
+| `get_league_teams` | Teams that competed in a `league_id`. |
+
+### Pro scene
+
+| Tool | Description |
+| --- | --- |
+| `get_pro_players` | Known professional players — resolve a pro's name to an `account_id`. |
+| `get_top_players` | Highest-rated players by estimated MMR (top of the ladder). |
+
+### Misc / diagnostic
+
+| Tool | Description |
+| --- | --- |
+| `get_records` | All-time record holders for a match field. |
+| `get_parsed_matches` | The recent parsed-match feed (paginated). |
+| `get_metadata` | Site-wide metadata (current patch, etc.). |
+| `get_health` | OpenDota API health snapshot. |
+
+**Write tools (opt-in):** three more tools — `request_parse`,
+`get_parse_request`, `refresh_player` — are registered only when
+`opendota.write-tools-enabled=true` (off by default; see
+[Write tools (opt-in)](#write-tools-opt-in) under Configuration).
+
+> **Breaking input-schema changes since the first release:** `get_hero_rankings`
+> and `get_benchmarks` now take `hero_id` as an **integer** (was a string); and the
+> `get_player_matches` array filters (`included_account_id`, `with_hero_id`,
+> `against_hero_id`) are now **comma-separated strings** (were single integers — a
+> single value still works).
 
 ## Prerequisites
 
@@ -61,12 +135,12 @@ The server exposes 14 tools in three groups.
 mvn clean package
 ```
 
-This produces the runnable jar at `target/opendota-mcp-1.0.0.jar`.
+This produces the runnable jar at `target/opendota-mcp-1.1.0.jar`.
 
 ## Run
 
 ```sh
-java -jar target/opendota-mcp-1.0.0.jar
+java -jar target/opendota-mcp-1.1.0.jar
 ```
 
 The server speaks the MCP **stdio** transport: it reads JSON-RPC requests on
@@ -127,6 +201,7 @@ variables, JVM `-D` flags, or an external `application.properties`):
 | `opendota.cache-max-entries` | `4096` | Max cached responses retained before the nearest-to-expiry entry is evicted. |
 | `opendota.rate-limit-budget` | `10s` | Max time a request waits for a rate-limit permit before returning a rate-limited error. |
 | `opendota.rate-limit-permits-per-minute` | `0` | Outbound permits/minute (`0` = tier default: 300 keyed / 60 keyless). When several server processes share one API key, set this to `tier_budget / process_count` so their combined rate stays within OpenDota's real per-key ceiling. |
+| `opendota.log-retention-days` | `7` | Days of per-process `./logs/opendota-mcp-<pid>.log` files to keep; older orphaned files are purged on startup (the current process's file is always kept). |
 | `opendota.sidecar-enabled` | `false` | Forward every OpenDota call to a shared local sidecar instead of calling OpenDota directly — see [Running several agents](#running-several-agents-shared-sidecar). |
 | `opendota.sidecar-host` / `opendota.sidecar-port` | `127.0.0.1` / `31337` | Address of the shared sidecar (used only when `sidecar-enabled` is `true`). |
 | `opendota.write-tools-enabled` | `false` | Register the opt-in write tools — see [Write tools](#write-tools-opt-in). Off by default; the server is read-only unless you set this. |
@@ -157,10 +232,10 @@ agent forwards its calls to it, so the real budget is honoured exactly once.
 
 ```sh
 # build it (a separate, dependency-light project under sidecar/)
-mvn -f sidecar/pom.xml clean package    # -> sidecar/target/opendota-sidecar-1.0.0.jar
+mvn -f sidecar/pom.xml clean package    # -> sidecar/target/opendota-sidecar-1.1.0.jar
 
 # run it once per machine (it holds the key; the agents then don't need one)
-OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.0.0.jar
+OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.1.0.jar
 ```
 
 Then point each agent at it by setting `opendota.sidecar-enabled=true` (and leaving

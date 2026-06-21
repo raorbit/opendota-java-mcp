@@ -7,7 +7,7 @@ Build the jar first (see the project [README](../README.md)):
 
 ```sh
 mvn clean package
-# -> target/opendota-mcp-1.0.0.jar
+# -> target/opendota-mcp-1.1.0.jar
 ```
 
 The OpenDota API key is **optional** — the server works fully keyless. If you
@@ -32,7 +32,7 @@ Add (or merge) an entry under `mcpServers`:
       "command": "java",
       "args": [
         "-jar",
-        "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.0.0.jar"
+        "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.1.0.jar"
       ],
       "env": {
         "OPENDOTA_API_KEY": "<optional-uuid-or-omit>"
@@ -59,7 +59,7 @@ place a `.mcp.json` file at the project root. The structure is identical to the
       "command": "java",
       "args": [
         "-jar",
-        "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.0.0.jar"
+        "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.1.0.jar"
       ],
       "env": {
         "OPENDOTA_API_KEY": "<optional-uuid-or-omit>"
@@ -90,16 +90,16 @@ owns the single rate limiter and a shared cache, and have each server forward to
    test it on its own:
    ```sh
    mvn -f sidecar/pom.xml clean package   # build + test
-   # -> sidecar/target/opendota-sidecar-1.0.0.jar
+   # -> sidecar/target/opendota-sidecar-1.1.0.jar
    ```
 2. Run it once per machine, giving it the key (the agents then do not need one):
    ```powershell
    # PowerShell
-   $env:OPENDOTA_API_KEY = '<uuid>'; java -jar sidecar\target\opendota-sidecar-1.0.0.jar
+   $env:OPENDOTA_API_KEY = '<uuid>'; java -jar sidecar\target\opendota-sidecar-1.1.0.jar
    ```
    ```sh
    # bash
-   OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.0.0.jar
+   OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.1.0.jar
    ```
    It binds `127.0.0.1:31337` (override with `OPENDOTA_SIDECAR_PORT` or
    `-Dopendota.sidecar.port=<port>`) and serves `GET /health` (liveness) plus `GET /stats`
@@ -131,7 +131,7 @@ owns the single rate limiter and a shared cache, and have each server forward to
          "args": [
            "-Dopendota.sidecar-enabled=true",
            "-jar",
-           "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.0.0.jar"
+           "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.1.0.jar"
          ]
        }
      }
@@ -150,6 +150,11 @@ owns the single rate limiter and a shared cache, and have each server forward to
    (`opendota.sidecar.port`); the sidecar also accepts the dashed `-Dopendota.sidecar-port=<port>`
    so the two cannot be silently mismatched by separator.
 
+> **Do not combine the write tools with the sidecar.** Setting
+> `opendota.write-tools-enabled=true` together with `opendota.sidecar-enabled=true`
+> **fails fast at startup** — the shared sidecar only proxies `GET`s. Run the write
+> tools on a direct (non-forwarding) server instead.
+
 ## Running the server directly
 
 You can also launch the jar yourself, for example to smoke-test it before
@@ -157,19 +162,27 @@ wiring up a client.
 
 ```powershell
 # PowerShell (with a key)
-$env:OPENDOTA_API_KEY = '00000000-0000-0000-0000-000000000000'; java -jar target\opendota-mcp-1.0.0.jar
+$env:OPENDOTA_API_KEY = '00000000-0000-0000-0000-000000000000'; java -jar target\opendota-mcp-1.1.0.jar
 
 # PowerShell (keyless)
-java -jar target\opendota-mcp-1.0.0.jar
+java -jar target\opendota-mcp-1.1.0.jar
 ```
 
 ```sh
 # bash (with a key)
-OPENDOTA_API_KEY=00000000-0000-0000-0000-000000000000 java -jar target/opendota-mcp-1.0.0.jar
+OPENDOTA_API_KEY=00000000-0000-0000-0000-000000000000 java -jar target/opendota-mcp-1.1.0.jar
 
 # bash (keyless)
-java -jar target/opendota-mcp-1.0.0.jar
+java -jar target/opendota-mcp-1.1.0.jar
 ```
 
 Because this is a stdio server, it will sit waiting for JSON-RPC input on stdin;
 that is expected when launched outside an MCP client.
+
+### Opt-in write tools
+
+The server is read-only by default. Add `-Dopendota.write-tools-enabled=true`
+(before `-jar`) to register three additional **write** tools — `request_parse`,
+`get_parse_request`, `refresh_player` — which POST to OpenDota to queue a match
+parse or refresh a player. They are absent from `tools/list` unless the flag is
+set, and (as noted above) cannot be combined with sidecar forwarding.
