@@ -139,7 +139,15 @@ OpenDota path the sidecar already forwards (e.g. `/matches/123`, `/players/456/r
 | `/heroes/{id}/…` (per-hero sub-paths, not the static `/heroes` list) | **TTL** | Rolling per-hero aggregates over recent matches; volatile, not patch-pinned. |
 | `/benchmarks`                                          | **TTL** | Percentile benchmarks over recent matches; a slow-moving aggregate (1h). |
 | `/distributions`                                       | **TTL** | MMR/rank distribution histograms; change very slowly (6h). |
+| `/schema`                                              | **TTL** | The `/explorer` SQL schema; near-static (24h). |
+| `/proPlayers`, `/topPlayers`                           | **TTL** | Slow-moving pro roster / top-ladder rankings (6h). |
+| `/teams`, `/leagues`                                   | **TTL** | Team/league profiles (1h); their `…/matches` feeds (60s). |
+| `/records`                                             | **TTL** | All-time record leaderboards; move slowly (1h). |
+| `/parsedMatches`                                       | **TTL** | The rolling public parse feed (60s). |
+| `/metadata`                                            | **TTL** | Site-wide metadata; semi-static (5m). |
 | `/live`                                                | **NO_STORE** | Live game state — never durable. |
+| `/explorer`                                            | **NO_STORE** | Ad-hoc SQL: unique per query, and a SQL error arrives as HTTP 200 (so caching would pin error bodies). Classified **explicitly** (not via the default below) so a future reorder can't make it cacheable. |
+| `/request`                                             | **NO_STORE** | A parse job's polled status (write tools); volatile/short-lived. Classified explicitly. |
 | *anything else (default)*                              | **NO_STORE** | Conservative default: an unrecognised path is never persisted. |
 
 Notes:
@@ -158,7 +166,7 @@ Notes:
 
 #### TTL sourcing (v2)
 The per-path TTL comes from `OpenDotaClient.ttlFor(path)` — now `public` — which is the **single
-source of truth** for these horizons (`/benchmarks` 1h, `/distributions` 6h, `/heroes/{id}/*` 6h,
+source of truth** for these horizons (`/benchmarks` 1h, `/distributions` 6h, `/heroes/{id}/*` 60s,
 `/players/` 30s, `/search` 15s, …). The gateway calls `client.ttlFor(path)` for the TTL-row
 duration and does **not** maintain a second prefix→`Duration` table in the sidecar: a duplicate
 table would silently diverge the first time a horizon is tuned in `ttlFor`. `ttlFor` is already
