@@ -4,7 +4,7 @@
       "command": "java",
       "args": [
         "-jar",
-        "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.0.0.jar"
+        "C:\\Users\\raorb\\Projects\\opendota-java-mcp\\target\\opendota-mcp-1.1.0.jar"
       ],
       "env": {
         "OPENDOTA_API_KEY": ""
