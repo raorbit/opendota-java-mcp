@@ -106,5 +106,13 @@ These constraints are locked (see `CLAUDE.md`); a CVE response must respect them
 - The sidecar is a standalone build with **no parent** and JDK-only runtime; do
   not introduce a reactor parent to "unify" dependency management. Each build
   applies this same single-transitive-pin policy independently.
-- `sqlite-jdbc` (the future durable L2 cache) belongs in the **sidecar** pom
-  only — never in the root pom.
+- `sqlite-jdbc` (the durable L2 cache, now implemented in the sidecar) belongs in
+  the **sidecar** pom only — never in the root pom.
+- `jackson-databind` is now used **directly** by application code (`ExplorerTools`
+  reshapes the `/explorer` response via `ObjectMapper`/`JsonNode`). It is left
+  **undeclared** in the root pom and version-managed transitively by the Spring
+  Boot parent. This is Jackson **tree-model** reshaping, **not** DTO/POJO binding,
+  so the repo-wide "raw JSON strings, no DTO mapping" invariant still holds. A
+  Jackson CVE is handled by the same single-line `dependencyManagement` backport as
+  any other transitive — it is not forward-pinned today (unlike json-schema-validator),
+  because the parent's managed version satisfies the code.
