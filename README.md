@@ -201,7 +201,8 @@ variables, JVM `-D` flags, or an external `application.properties`):
 | `opendota.cache-max-entries` | `4096` | Max cached responses retained before the nearest-to-expiry entry is evicted. |
 | `opendota.rate-limit-budget` | `10s` | Max time a request waits for a rate-limit permit before returning a rate-limited error. |
 | `opendota.rate-limit-permits-per-minute` | `0` | Outbound permits/minute (`0` = tier default: 300 keyed / 60 keyless). When several server processes share one API key, set this to `tier_budget / process_count` so their combined rate stays within OpenDota's real per-key ceiling. |
-| `opendota.log-retention-days` | `7` | Days of per-process `./logs/opendota-mcp-<pid>.log` files to keep; older orphaned files are purged on startup (the current process's file is always kept). |
+| `opendota.log-retention-days` | `7` | Days of per-process `opendota-mcp-<pid>.log` files to keep; older orphaned files are purged on startup (the current process's file is always kept). |
+| `OPENDOTA_LOG_DIR` (env var) | `~/.opendota-mcp/logs` | Directory for the per-process log files. Absolute by default (so logs never land in the client's working directory); override to relocate them. |
 | `opendota.sidecar-enabled` | `false` | Forward every OpenDota call to a shared local sidecar instead of calling OpenDota directly — see [Running several agents](#running-several-agents-shared-sidecar). |
 | `opendota.sidecar-host` / `opendota.sidecar-port` | `127.0.0.1` / `31337` | Address of the shared sidecar (used only when `sidecar-enabled` is `true`). |
 | `opendota.write-tools-enabled` | `false` | Register the opt-in write tools — see [Write tools](#write-tools-opt-in). Off by default; the server is read-only unless you set this. |
@@ -262,8 +263,10 @@ connection. The application is configured to keep stdout clean:
 - the Spring Boot startup banner is disabled;
 - the console log appender is turned off (`logging.threshold.console=OFF`), so no
   application logs are written to stdout;
-- all logs are written to `./logs/opendota-mcp-<pid>.log` instead (per-process, so
-  several co-running servers don't interleave into one file).
+- all logs are written to `~/.opendota-mcp/logs/opendota-mcp-<pid>.log` instead
+  (an absolute, working-directory-independent path so logs never pollute the
+  client's launch directory; per-process, so several co-running servers don't
+  interleave into one file). Override the directory with `OPENDOTA_LOG_DIR`.
 
 When modifying this project, **never** call `System.out.println` (or otherwise
 write to stdout) from application code. Route diagnostics through the logger so
