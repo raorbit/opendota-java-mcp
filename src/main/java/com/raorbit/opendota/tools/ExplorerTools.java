@@ -145,11 +145,21 @@ public class ExplorerTools {
      * Ensures the query ends with a LIMIT clause bounded by {@code cap}.
      * If a limit exists and exceeds cap, it is clamped; otherwise, a limit is appended.
      * Preserves trailing OFFSET if present after LIMIT.
+     *
+     * <p>A LIMIT literal too large to fit in a {@code long} (e.g. {@code LIMIT 9999999999999999999})
+     * is, a fortiori, larger than {@code cap}, so it is clamped to {@code cap} like any other
+     * oversized LIMIT — rather than letting {@link Long#parseLong} throw a
+     * {@link NumberFormatException} out of the (never-throwing) tool handler.
      */
     static String applyLimit(String sql, int cap) {
         Matcher m = TRAILING_LIMIT.matcher(sql);
         if (m.find()) {
-            long requested = Long.parseLong(m.group(1));
+            long requested;
+            try {
+                requested = Long.parseLong(m.group(1));
+            } catch (NumberFormatException overflow) {
+                requested = cap;
+            }
             String offset = m.group(2) != null ? m.group(2) : "";
             return m.replaceFirst("LIMIT " + Math.min(requested, cap) + offset);
         }

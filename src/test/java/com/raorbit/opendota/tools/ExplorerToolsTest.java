@@ -247,4 +247,28 @@ class ExplorerToolsTest {
         assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 5 OFFSET 10", 200)).isEqualTo("SELECT 1 LIMIT 5 OFFSET 10");
         assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 999999 offset 10", 2000)).isEqualTo("SELECT 1 LIMIT 2000 offset 10");
     }
+
+    @Test
+    void applyLimitClampsAnOverRangeLimitInsteadOfThrowing() {
+        // A 19-digit LIMIT overflows a long; it must clamp to cap, not throw NumberFormatException.
+        assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 9999999999999999999", 2000))
+                .isEqualTo("SELECT 1 LIMIT 2000");
+        // ... and the trailing OFFSET is still preserved when the LIMIT overflows.
+        assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 9999999999999999999 OFFSET 10", 2000))
+                .isEqualTo("SELECT 1 LIMIT 2000 OFFSET 10");
+    }
+
+    @Test
+    void overRangeInSqlLimitIsClampedNotThrownFromTheHandler() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("{\"rows\":[]}");
+        ExplorerTools tools = new ExplorerTools(client);
+
+        // guardSql runs OUTSIDE runSqlExplorer's try/catch, so a NumberFormatException from a
+        // LIMIT literal too large for a long would escape the @Tool handler. It must instead be
+        // clamped to the cap like any other oversized LIMIT — this pins that the handler never throws.
+        tools.runSqlExplorer("SELECT 1 LIMIT 9999999999999999999", 2000);
+
+        assertThat(capturedPath(client)).isEqualTo("/explorer?sql=" + OpenDotaClient.encode("SELECT 1 LIMIT 2000"));
+    }
 }
