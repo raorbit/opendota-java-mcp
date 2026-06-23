@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * Sweeps orphaned per-PID log files on startup. Each JVM logs to its own
- * {@code logs/opendota-mcp-<pid>.log} (the per-PID name avoids multi-process contention on one file),
+ * {@code ~/.opendota-mcp/logs/opendota-mcp-<pid>.log} (the per-PID name avoids multi-process contention on one file),
  * and desktop MCP clients spawn a process per chat and SIGKILL it on close, so without cleanup the log
  * directory accumulates one orphaned file per session forever.
  *
