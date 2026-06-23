@@ -242,5 +242,9 @@ class ExplorerToolsTest {
         assertThat(ExplorerTools.applyLimit("SELECT 1", 200)).isEqualTo("SELECT 1 LIMIT 200");
         assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 5", 200)).isEqualTo("SELECT 1 LIMIT 5");
         assertThat(ExplorerTools.applyLimit("SELECT 1 limit 999999", 2000)).isEqualTo("SELECT 1 LIMIT 2000");
+        
+        // Handles trailing OFFSET preservation
+        assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 5 OFFSET 10", 200)).isEqualTo("SELECT 1 LIMIT 5 OFFSET 10");
+        assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 999999 offset 10", 2000)).isEqualTo("SELECT 1 LIMIT 2000 offset 10");
     }
 }

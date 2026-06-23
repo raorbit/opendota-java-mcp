@@ -50,7 +50,7 @@ public class ExplorerTools {
     private static final Pattern STARTS_READONLY =
             Pattern.compile("^\\s*(select|with)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern TRAILING_LIMIT =
-            Pattern.compile("\\blimit\\s+(\\d+)\\s*$", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("\\blimit\\s+(\\d+)(\\s+offset\\s+\\d+)?\\s*$", Pattern.CASE_INSENSITIVE);
     private static final Pattern TRAILING_SEMICOLON = Pattern.compile(";\\s*$");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Logger log = LoggerFactory.getLogger(ExplorerTools.class);
@@ -141,12 +141,17 @@ public class ExplorerTools {
         return Guard.ok(applyLimit(sql, cap));
     }
 
-    /** Append a {@code LIMIT} if absent, or clamp an existing trailing {@code LIMIT} to {@code cap}. */
+    /**
+     * Ensures the query ends with a LIMIT clause bounded by {@code cap}.
+     * If a limit exists and exceeds cap, it is clamped; otherwise, a limit is appended.
+     * Preserves trailing OFFSET if present after LIMIT.
+     */
     static String applyLimit(String sql, int cap) {
         Matcher m = TRAILING_LIMIT.matcher(sql);
         if (m.find()) {
             long requested = Long.parseLong(m.group(1));
-            return m.replaceFirst("LIMIT " + Math.min(requested, cap));
+            String offset = m.group(2) != null ? m.group(2) : "";
+            return m.replaceFirst("LIMIT " + Math.min(requested, cap) + offset);
         }
         return sql + " LIMIT " + cap;
     }
