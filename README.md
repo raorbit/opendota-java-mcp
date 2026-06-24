@@ -147,6 +147,78 @@ The server speaks the MCP **stdio** transport: it reads JSON-RPC requests on
 stdin and writes responses on stdout. It is intended to be launched by an MCP
 client, not run interactively.
 
+## Run with Docker
+
+Each release publishes two images to GHCR — `ghcr.io/raorbit/opendota-mcp` and
+`ghcr.io/raorbit/opendota-sidecar`, tagged with the release version — or build them
+locally as shown below. Requires **Docker Engine ≥ 28.0.1** (for the host-loopback
+port-publish guarantee the sidecar relies on).
+
+### MCP server image
+
+```sh
+docker build -t opendota-mcp:1.1.0 .
+# or: docker pull ghcr.io/raorbit/opendota-mcp:1.1.0
+```
+
+The server is a **stdio** process, so an MCP client launches it with `docker run -i --rm`
+(interactive stdin; **never** `-t` — a TTY corrupts the JSON-RPC framing). Register it like
+the `java -jar` form but with `"command": "docker"`. The bare `-e OPENDOTA_API_KEY` only
+*forwards* the variable — its value must also be supplied in the `env` block, because MCP
+clients do not pass the host environment through:
+
+```json
+{
+  "mcpServers": {
+    "opendota": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "--init", "-e", "OPENDOTA_API_KEY", "ghcr.io/raorbit/opendota-mcp:1.1.0"],
+      "env": { "OPENDOTA_API_KEY": "<optional-uuid-or-omit>" }
+    }
+  }
+}
+```
+
+For keyless operation, drop both the `-e OPENDOTA_API_KEY` arg and the `env` entry. **Build
+or pull the image before first use** — otherwise the client's first launch blocks on a
+multi-hundred-megabyte image pull and may trip its startup timeout. For interactive local use
+the plain jar (`java -jar`) starts faster; Docker is for distribution / running without a host
+JDK.
+
+### Sidecar (shared, durable) via Compose
+
+The shared sidecar (see [Configuration](#configuration)) runs as a long-lived service:
+
+```sh
+cp .env.example .env        # fill in OPENDOTA_API_KEY and a strong OPENDOTA_SIDECAR_TOKEN
+docker compose up -d        # builds the image, starts the sidecar on 127.0.0.1:31337
+```
+
+The compose service binds `0.0.0.0` *inside* the container but publishes only to **host
+loopback** (`127.0.0.1:31337`); enables the durable **L2 SQLite cache** on a named volume
+(`l2data:/data`) that survives restarts; and **requires** `OPENDOTA_SIDECAR_TOKEN` — on a
+shared docker network the token is the only thing protecting the API key from co-located
+containers, and a blank token disables auth (confirm `auth=true` in
+`docker compose logs sidecar`).
+
+Point agents at it in one of two ways:
+
+1. **Host jar → sidecar** (simplest): run the MCP server as a jar with
+   `OPENDOTA_SIDECAR_ENABLED=true`; it reaches the published `127.0.0.1:31337`.
+2. **Containerized server → sidecar**: run the server image on the compose network and set
+   `OPENDOTA_SIDECAR_HOST=sidecar` (plus the matching token):
+   ```sh
+   docker run -i --rm --init \
+     --network opendota-java-mcp_opendota \
+     -e OPENDOTA_SIDECAR_ENABLED=true -e OPENDOTA_SIDECAR_HOST=sidecar \
+     -e OPENDOTA_SIDECAR_TOKEN -e OPENDOTA_API_KEY \
+     ghcr.io/raorbit/opendota-mcp:1.1.0
+   ```
+   (Find the real network name with `docker network ls`; Compose names it
+   `<project>_opendota`.) The main server is intentionally **not** a Compose service — it is a
+   stdio process a client must spawn, so a long-lived service would have nothing driving its
+   stdio.
+
 ## Develop
 
 ```sh
