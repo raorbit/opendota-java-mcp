@@ -5,6 +5,31 @@ All notable changes to **opendota-mcp** are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-24
+
+Container packaging for both the MCP server and the shared sidecar, published to GHCR, plus a
+configurable sidecar bind host gated by a fail-closed token requirement.
+
+### Added
+
+- **Docker images.** A multi-stage `Dockerfile` for the stdio MCP server and a `sidecar/Dockerfile`
+  for the shared sidecar, plus a `docker-compose.yml` (durable L2 volume, host-loopback publish,
+  token-gated) and a committed `.env.example`. The release workflow now builds and pushes both
+  images multi-arch (`linux/amd64`, `linux/arm64`) to GHCR, tagged from the release version.
+- **`OPENDOTA_SIDECAR_BIND`** (system property `opendota.sidecar.bind` / `opendota.sidecar-bind`)
+  to set the sidecar's bind host; defaults to `127.0.0.1` (loopback-only, unchanged).
+
+### Security
+
+- The sidecar now **refuses to start** when it binds a non-loopback address without a token, and
+  `docker compose up` fails fast if `OPENDOTA_SIDECAR_TOKEN` is unset — closing the fail-open gap
+  where a network-reachable sidecar would serve `/api` and `/stats` (and the API key it holds)
+  unauthenticated.
+
+### Fixed
+
+- Corrected stale `opendota-sidecar-1.0.0.jar` references in the sidecar lifecycle scripts.
+
 ## [1.1.0] - 2026-06-20
 
 A large read-only tool expansion (18 → ~49 tools), one opt-in write surface, and a round of

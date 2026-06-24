@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-JAR="$ROOT_DIR/sidecar/target/opendota-sidecar-1.1.0.jar"
+JAR="$ROOT_DIR/sidecar/target/opendota-sidecar-1.2.0.jar"
 RUN_DIR="$ROOT_DIR/sidecar/.run"
 PID_FILE="$RUN_DIR/sidecar.pid"
 LOG_FILE="$RUN_DIR/sidecar.log"
