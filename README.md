@@ -198,8 +198,9 @@ The compose service binds `0.0.0.0` *inside* the container but publishes only to
 loopback** (`127.0.0.1:31337`); enables the durable **L2 SQLite cache** on a named volume
 (`l2data:/data`) that survives restarts; and **requires** `OPENDOTA_SIDECAR_TOKEN` — on a
 shared docker network the token is the only thing protecting the API key from co-located
-containers, and a blank token disables auth (confirm `auth=true` in
-`docker compose logs sidecar`).
+containers. This is enforced, not just advised: `docker compose up` refuses to start without
+a token, and the sidecar itself refuses to start on a non-loopback bind unless one is set
+(confirm `auth=true` in `docker compose logs sidecar`).
 
 Point agents at it in one of two ways:
 

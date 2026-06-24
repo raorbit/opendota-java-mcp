@@ -11,10 +11,13 @@ services:
       context: ./sidecar
     image: opendota-sidecar:1.1.0
     init: true
-    env_file:
-      - path: .env
-        required: false
     environment:
+      # Secrets come from .env (Compose auto-loads it for ${...} substitution; see .env.example).
+      # The token is REQUIRED here: the sidecar binds 0.0.0.0 below, so without it /api and /stats —
+      # and the API key it holds — would be reachable unauthenticated by any container on this
+      # network. `docker compose up`/`config` fails fast if it is unset or empty.
+      OPENDOTA_SIDECAR_TOKEN: "${OPENDOTA_SIDECAR_TOKEN:?set OPENDOTA_SIDECAR_TOKEN in .env — see .env.example}"
+      OPENDOTA_API_KEY: "${OPENDOTA_API_KEY:-}"
       # Bind all interfaces INSIDE the container so the published port and network peers can
       # reach it. Host-facing exposure is still loopback-only (see ports below).
       OPENDOTA_SIDECAR_BIND: "0.0.0.0"

@@ -4,6 +4,8 @@ import com.raorbit.opendota.client.OpenDotaClient;
 
 import java.io.IOException;
 import java.net.BindException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.sql.SQLException;
 import java.util.concurrent.CountDownLatch;
 import java.util.logging.Logger;
@@ -35,6 +37,17 @@ public final class SidecarMain {
     public static void main(String[] args) throws IOException, InterruptedException {
         int port = resolvePort();
         String bindHost = resolveBindHost();
+        String token = resolveToken();
+        // Fail closed: a non-loopback bind with no token would expose /api and /stats — and the
+        // API key the sidecar holds — unauthenticated to anything that can reach the bind address.
+        // Refuse to start rather than silently running open (the token gate is the only protection).
+        if (requiresToken(bindHost) && isBlank(token)) {
+            LOG.severe("refusing to start: bind host '" + bindHost + "' is not loopback but no token "
+                    + "is set, which would expose /api and /stats (and the API key) unauthenticated. "
+                    + "Set OPENDOTA_SIDECAR_TOKEN (or -Dopendota.sidecar.token), or bind 127.0.0.1.");
+            System.exit(1);
+            return;   // unreachable after exit; keeps the compiler happy
+        }
         OpenDotaClient client = new OpenDotaClient(System.getenv("OPENDOTA_API_KEY"));
         if (!client.isKeyed()) {
             // Easy to miss: the agents no longer carry the key, so this process is the only
@@ -50,7 +63,7 @@ public final class SidecarMain {
 
         SidecarHttpServer server;
         try {
-            server = new SidecarHttpServer(bindHost, port, client, gateway, resolveToken());
+            server = new SidecarHttpServer(bindHost, port, client, gateway, token);
         } catch (BindException e) {
             // Most likely a sidecar is already running on this port (the design is one shared
             // process per machine). Fail fast with an actionable message, not a raw stack trace.
@@ -158,5 +171,22 @@ public final class SidecarMain {
             return DEFAULT_BIND_HOST;
         }
         return raw.trim();
+    }
+
+    /**
+     * Whether binding {@code bindHost} reaches beyond loopback, in which case a shared-secret token is
+     * mandatory (the sidecar holds the API key and has no other auth). An unresolvable host is treated
+     * as exposed, so the guard fails safe rather than silently allowing an open bind.
+     */
+    static boolean requiresToken(String bindHost) {
+        try {
+            return !InetAddress.getByName(bindHost).isLoopbackAddress();
+        } catch (UnknownHostException e) {
+            return true;
+        }
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
     }
 }

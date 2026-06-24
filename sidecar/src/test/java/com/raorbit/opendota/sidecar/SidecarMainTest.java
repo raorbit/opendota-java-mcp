@@ -121,6 +121,19 @@ class SidecarMainTest {
     }
 
     @Test
+    void requiresTokenIsFalseForLoopbackBinds() {
+        assertThat(SidecarMain.requiresToken("127.0.0.1")).isFalse();
+        assertThat(SidecarMain.requiresToken("::1")).isFalse();
+        assertThat(SidecarMain.requiresToken("localhost")).isFalse();
+    }
+
+    @Test
+    void requiresTokenIsTrueForNonLoopbackBinds() {
+        assertThat(SidecarMain.requiresToken("0.0.0.0")).isTrue();
+        assertThat(SidecarMain.requiresToken("10.0.0.5")).isTrue();
+    }
+
+    @Test
     void outOfRangePortsFallBackToDefault() {
         assumeTrue(System.getenv("OPENDOTA_SIDECAR_PORT") == null);
         for (String oob : new String[] {"0", "-1", "65536", "99999"}) {
