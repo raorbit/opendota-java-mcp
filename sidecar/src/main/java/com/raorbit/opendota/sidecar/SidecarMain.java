@@ -18,7 +18,7 @@ import java.util.logging.Logger;
  * loopback HTTP server and blocks until the JVM is shut down.
  *
  * <p>Run it once per machine before launching the agents:
- * <pre>{@code OPENDOTA_API_KEY=<uuid> java -jar opendota-sidecar-1.0.0.jar}</pre>
+ * <pre>{@code OPENDOTA_API_KEY=<uuid> java -jar opendota-sidecar-1.1.0.jar}</pre>
  *
  * <p>This process is a plain HTTP server, not the stdio MCP transport, so logging to
  * the console is fine; redirect it to a file if you run it in the background.
