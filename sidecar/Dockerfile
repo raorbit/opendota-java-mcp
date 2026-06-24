@@ -10,7 +10,8 @@ FROM maven:3.9-eclipse-temurin-21 AS builder
 WORKDIR /build
 COPY pom.xml .
 COPY src ./src
-RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests
+RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests \
+    && cp target/opendota-sidecar-*.jar app.jar
 
 # ---- runtime stage ----
 FROM eclipse-temurin:21-jre-jammy
@@ -21,8 +22,9 @@ RUN groupadd -g 10001 app && useradd -u 10001 -g app -m app \
     && mkdir -p /data && chown 10001:10001 /data
 WORKDIR /app
 # The plain jar's manifest carries `Class-Path: lib/sqlite-jdbc-*.jar`, resolved relative to
-# the jar — so the jar and its lib/ MUST be siblings in this directory.
-COPY --from=builder /build/target/opendota-sidecar-1.1.0.jar ./
+# the jar — so the jar (renamed to a stable, version-independent name in the builder) and its
+# lib/ MUST be siblings in this directory.
+COPY --from=builder /build/app.jar ./
 COPY --from=builder /build/target/lib/ ./lib/
 USER 10001
 VOLUME /data
@@ -31,4 +33,4 @@ EXPOSE 31337
 # binds loopback). /health stays open even when a token gates /api and /stats.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
     CMD curl -fsS "http://127.0.0.1:${OPENDOTA_SIDECAR_PORT:-31337}/health" || exit 1
-ENTRYPOINT ["java", "-jar", "opendota-sidecar-1.1.0.jar"]
+ENTRYPOINT ["java", "-jar", "app.jar"]
