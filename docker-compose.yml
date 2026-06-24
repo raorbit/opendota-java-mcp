@@ -1,0 +1,42 @@
+# Runs the shared OpenDota sidecar as a durable service. The main MCP server is NOT a
+# service here: it is a stdio process an MCP client must spawn (see docs/mcp-registration.md
+# and the root Dockerfile) — a long-lived compose service would have no client driving its
+# stdio. Copy .env.example to .env first (holds the API key + sidecar token).
+#
+# Requires Docker Engine >= 28.0.1 for the loopback-publish guarantee below.
+
+services:
+  sidecar:
+    build:
+      context: ./sidecar
+    image: opendota-sidecar:1.1.0
+    init: true
+    environment:
+      # Secrets come from .env (Compose auto-loads it for ${...} substitution; see .env.example).
+      # The token is REQUIRED here: the sidecar binds 0.0.0.0 below, so without it /api and /stats —
+      # and the API key it holds — would be reachable unauthenticated by any container on this
+      # network. `docker compose up`/`config` fails fast if it is unset or empty.
+      OPENDOTA_SIDECAR_TOKEN: "${OPENDOTA_SIDECAR_TOKEN:?set OPENDOTA_SIDECAR_TOKEN in .env — see .env.example}"
+      OPENDOTA_API_KEY: "${OPENDOTA_API_KEY:-}"
+      # Bind all interfaces INSIDE the container so the published port and network peers can
+      # reach it. Host-facing exposure is still loopback-only (see ports below).
+      OPENDOTA_SIDECAR_BIND: "0.0.0.0"
+      OPENDOTA_SIDECAR_L2: "true"
+      OPENDOTA_SIDECAR_L2_DB: "/data/l2-cache.db"
+    ports:
+      # Host-facing exposure is loopback-only. NOTE: container peers on the network below
+      # reach :31337 DIRECTLY, bypassing this publish — so OPENDOTA_SIDECAR_TOKEN is REQUIRED.
+      - "127.0.0.1:31337:31337"
+    volumes:
+      - l2data:/data
+    networks:
+      - opendota
+    restart: unless-stopped
+
+volumes:
+  l2data:
+
+networks:
+  # Dedicated, minimal network — attach only the sidecar and its intended consumers.
+  opendota:
+    driver: bridge

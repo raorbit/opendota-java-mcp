@@ -14,13 +14,15 @@ import java.util.concurrent.Executors;
 import java.util.logging.Logger;
 
 /**
- * A loopback-only HTTP front end for a single shared {@link OpenDotaClient}.
+ * An HTTP front end for a single shared {@link OpenDotaClient}.
  *
  * <p>Several MCP server processes on one machine each forward their OpenDota GETs
  * here, so the one rate limiter, cache and single-flight in the wrapped client are
  * shared across all of them and OpenDota's real per-key budget is honoured exactly
- * once. The server binds {@code 127.0.0.1} only, so it carries no authentication or
- * TLS surface (and the API key it holds never leaves this machine).
+ * once. The server binds {@code 127.0.0.1} (loopback) by default, so it normally carries
+ * no network-reachable surface and the API key it holds never leaves this machine. The
+ * bind host is configurable: set {@code 0.0.0.0} only when the sidecar must be reached
+ * across a container or network boundary, and gate it with a shared-secret token then.
  *
  * <p>Request contract: {@code GET /api/<openDotaPath>[?query]} maps 1:1 to the
  * OpenDota path {@code /<openDotaPath>[?query]} — mirroring the real base shape, so
@@ -55,6 +57,8 @@ public final class SidecarHttpServer implements AutoCloseable {
     private final L2CachingGateway gateway;
     /** Shared secret required on {@code /api/*}, or {@code null} to accept any local caller. */
     private final String token;
+    /** Host/interface the server is bound to (default {@code 127.0.0.1}); surfaced in the startup log. */
+    private final String bindHost;
 
     /**
      * @param port   loopback port to bind, or {@code 0} to pick an ephemeral one (tests)
@@ -71,24 +75,27 @@ public final class SidecarHttpServer implements AutoCloseable {
      *               {@value #TOKEN_HEADER} header (constant-time compared). {@code /health} stays open.
      */
     public SidecarHttpServer(int port, OpenDotaClient client, String token) throws IOException {
-        this(port, client, null, token);
+        this("127.0.0.1", port, client, null, token);
     }
 
     /**
-     * @param port    loopback port to bind, or {@code 0} to pick an ephemeral one (tests)
+     * @param bindHost host/interface to bind: {@code 127.0.0.1} for loopback-only (the default), or
+     *                 {@code 0.0.0.0} to accept connections across a container/network boundary
+     * @param port    port to bind, or {@code 0} to pick an ephemeral one (tests)
      * @param client  the shared upstream client (used for {@code /stats}); when {@code gateway} is
      *                non-null the gateway owns closing it, else this server does
      * @param gateway optional durable L2 decorator; when non-null, {@code /api} fetches route through
      *                it instead of the bare client, and it owns closing the client + SQLite store
      * @param token   optional shared secret gating {@code /api} and {@code /stats}
      */
-    public SidecarHttpServer(int port, OpenDotaClient client, L2CachingGateway gateway, String token)
-            throws IOException {
+    public SidecarHttpServer(String bindHost, int port, OpenDotaClient client, L2CachingGateway gateway,
+            String token) throws IOException {
         this.client = client;
         this.gateway = gateway;
         String trimmed = token == null ? null : token.trim();
         this.token = (trimmed == null || trimmed.isEmpty()) ? null : trimmed;
-        this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+        this.bindHost = bindHost;
+        this.server = HttpServer.create(new InetSocketAddress(bindHost, port), 0);
         this.server.createContext("/health", this::handleHealth);
         this.server.createContext("/stats", this::handleStats);
         this.server.createContext(API_PREFIX, this::handleApi);
@@ -97,7 +104,7 @@ public final class SidecarHttpServer implements AutoCloseable {
 
     public void start() {
         server.start();
-        LOG.info(() -> "opendota-sidecar listening on http://127.0.0.1:" + port()
+        LOG.info(() -> "opendota-sidecar listening on http://" + bindHost + ":" + port()
                 + " (keyed=" + client.isKeyed() + ", auth=" + (token != null) + ", l2=" + (gateway != null) + ")");
     }
 

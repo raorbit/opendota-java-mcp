@@ -8,10 +8,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Unit tests for {@link SidecarMain#resolvePort()} covering the property precedence
- * (dotted over dashed), the env fallback, and the validation of blank / non-numeric /
- * out-of-range values. Tests that rely on the default also assume the
- * {@code OPENDOTA_SIDECAR_PORT} env var is unset (it cannot be cleared in-process).
+ * Unit tests for {@link SidecarMain}'s {@code resolvePort()}, {@code resolveToken()} and
+ * {@code resolveBindHost()} resolvers, covering the property precedence (dotted over dashed),
+ * the env fallback, and the validation of blank / non-numeric / out-of-range values. Tests that
+ * rely on a default also assume the corresponding env var is unset (it cannot be cleared in-process).
  */
 class SidecarMainTest {
 
@@ -22,6 +22,10 @@ class SidecarMainTest {
     private static final String TOKEN_DOTTED = "opendota.sidecar.token";
     private static final String TOKEN_DASHED = "opendota.sidecar-token";
 
+    private static final String BIND_DOTTED = "opendota.sidecar.bind";
+    private static final String BIND_DASHED = "opendota.sidecar-bind";
+    private static final String DEFAULT_BIND_HOST = "127.0.0.1";
+
     @BeforeEach
     @AfterEach
     void clearProperties() {
@@ -29,6 +33,8 @@ class SidecarMainTest {
         System.clearProperty(DASHED);
         System.clearProperty(TOKEN_DOTTED);
         System.clearProperty(TOKEN_DASHED);
+        System.clearProperty(BIND_DOTTED);
+        System.clearProperty(BIND_DASHED);
     }
 
     @Test
@@ -89,6 +95,42 @@ class SidecarMainTest {
         assertThat(SidecarMain.resolveToken()).isEqualTo("dash-token");
         System.setProperty(TOKEN_DOTTED, "dot-token");
         assertThat(SidecarMain.resolveToken()).isEqualTo("dot-token");
+    }
+
+    @Test
+    void resolveBindHostDefaultsToLoopbackWhenUnset() {
+        assumeTrue(System.getenv("OPENDOTA_SIDECAR_BIND") == null);
+        assertThat(SidecarMain.resolveBindHost()).isEqualTo(DEFAULT_BIND_HOST);
+    }
+
+    @Test
+    void resolveBindHostReadsBothPropertySpellingsWithDottedWinning() {
+        System.setProperty(BIND_DASHED, "10.0.0.5");
+        assertThat(SidecarMain.resolveBindHost()).isEqualTo("10.0.0.5");
+        System.setProperty(BIND_DOTTED, "0.0.0.0");
+        assertThat(SidecarMain.resolveBindHost()).isEqualTo("0.0.0.0");
+    }
+
+    @Test
+    void resolveBindHostTrimsAndFallsBackOnBlank() {
+        System.setProperty(BIND_DOTTED, "  0.0.0.0  ");
+        assertThat(SidecarMain.resolveBindHost()).isEqualTo("0.0.0.0");
+        assumeTrue(System.getenv("OPENDOTA_SIDECAR_BIND") == null);
+        System.setProperty(BIND_DOTTED, "   ");
+        assertThat(SidecarMain.resolveBindHost()).isEqualTo(DEFAULT_BIND_HOST);
+    }
+
+    @Test
+    void requiresTokenIsFalseForLoopbackBinds() {
+        assertThat(SidecarMain.requiresToken("127.0.0.1")).isFalse();
+        assertThat(SidecarMain.requiresToken("::1")).isFalse();
+        assertThat(SidecarMain.requiresToken("localhost")).isFalse();
+    }
+
+    @Test
+    void requiresTokenIsTrueForNonLoopbackBinds() {
+        assertThat(SidecarMain.requiresToken("0.0.0.0")).isTrue();
+        assertThat(SidecarMain.requiresToken("10.0.0.5")).isTrue();
     }
 
     @Test

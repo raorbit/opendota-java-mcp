@@ -1,0 +1,19 @@
+# Build context for the main-server image (root context). Keep src/ and pom.xml;
+# exclude build output, VCS, logs, docs, IDE/agent dirs, and anything that may hold a secret.
+target/
+sidecar/target/
+.git/
+logs/
+dist/
+**/.run/
+docs/
+.github/
+.vscode/
+.claude/
+plans/
+*.md
+.mcp.json
+.mcp.json.example
+claude_desktop_config.json
+.env
+.env.*

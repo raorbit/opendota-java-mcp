@@ -1,0 +1,5 @@
+# Build context for the sidecar image (sidecar/ subtree). The sidecar compiles
+# standalone (its client-class copies are committed under src/), so the root tree is
+# not needed; drift is enforced in CI, and the image build skips tests.
+target/
+.run/

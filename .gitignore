@@ -24,10 +24,11 @@ bin/
 hs_err_pid*
 replay_pid*
 
-# Secrets / environment
+# Secrets / environment (commit only the *.example template)
 *.env
 .env
 .env.*
+!.env.example
 application-local.properties
 application-secrets.properties
 

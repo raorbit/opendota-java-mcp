@@ -78,12 +78,43 @@ exporting `OPENDOTA_API_KEY` as a real environment variable in your shell or OS
 keychain and leaving the value in the JSON empty, rather than inlining the secret
 into a file at all.
 
+## Running via Docker
+
+Instead of `java -jar`, you can run the server from a container image (see the project
+[README](../README.md#run-with-docker) for building or pulling it). Because the server is a
+stdio process, the client launches it with `docker run -i --rm` (interactive stdin; **never**
+add `-t`, which corrupts the JSON-RPC framing). The config mirrors the blocks above but with
+`"command": "docker"`. The bare `-e OPENDOTA_API_KEY` only *forwards* the variable, so its
+value must also appear in the `env` block (the client does not pass the host environment
+through):
+
+```json
+{
+  "mcpServers": {
+    "opendota": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "--init", "-e", "OPENDOTA_API_KEY", "ghcr.io/raorbit/opendota-mcp:1.1.0"],
+      "env": {
+        "OPENDOTA_API_KEY": "<optional-uuid-or-omit>"
+      }
+    }
+  }
+}
+```
+
+Build or pull the image before first use so the initial launch does not block on an image
+pull. For keyless operation, drop both the `-e OPENDOTA_API_KEY` arg and the `env` entry.
+
 ## Shared sidecar for multiple agents
 
 If you run several agents on one machine that share a single `OPENDOTA_API_KEY`,
 their independent rate limiters can jointly exceed OpenDota's real per-key limit
 (it is enforced per key, not per process). Run the **sidecar** so one local process
 owns the single rate limiter and a shared cache, and have each server forward to it.
+
+> You can also run the sidecar as a container — see
+> [Run with Docker](../README.md#run-with-docker) for the Docker Compose setup (durable L2
+> volume + required token). The steps below cover running it directly from the jar.
 
 1. Build the sidecar (a separate, dependency-light project under `sidecar/`). It is its
    own Maven build — the root `mvn package` does **not** build or test it, so build and
@@ -101,8 +132,11 @@ owns the single rate limiter and a shared cache, and have each server forward to
    # bash
    OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.1.0.jar
    ```
-   It binds `127.0.0.1:31337` (override with `OPENDOTA_SIDECAR_PORT` or
-   `-Dopendota.sidecar.port=<port>`) and serves `GET /health` (liveness) plus `GET /stats`
+   It binds `127.0.0.1:31337` by default — override the port with `OPENDOTA_SIDECAR_PORT`
+   (or `-Dopendota.sidecar.port=<port>`) and the bind host with `OPENDOTA_SIDECAR_BIND`
+   (or `-Dopendota.sidecar.bind=<host>`); set the bind host to `0.0.0.0` only when the sidecar
+   must be reachable across a container/network boundary (the Docker Compose setup does this),
+   and gate it with a token then. It serves `GET /health` (liveness) plus `GET /stats`
    (cache hit/miss and rate-limiter counters). It is a plain HTTP process,
    not the stdio transport, so it logs to the console — redirect it to a file if you
    run it in the background.
