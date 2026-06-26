@@ -87,6 +87,11 @@ public final class SidecarMain {
         }
         Runtime.getRuntime().addShutdownHook(new Thread(server::close, "sidecar-shutdown"));
         server.start();
+        // Start the proactive watched-match parse poll (no-op unless watched players are configured with
+        // auto-parse on). The server is up first; the shutdown hook closes the gateway, stopping the poll.
+        if (gateway != null) {
+            gateway.startWatchedParsePoll();
+        }
         // Park the main thread so the process stays up as a long-lived service until
         // the JVM is signalled to stop (the shutdown hook then closes the server).
         new CountDownLatch(1).await();

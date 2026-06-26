@@ -64,6 +64,13 @@ public final class L2CachingGateway implements AutoCloseable {
      * free, like {@link #isParsedMatch} — a regex scan over the opaque body, not a JSON parse.
      */
     private final Pattern watchedPattern;
+    /**
+     * Auto-parser for watched matches (spec §6.5): requests OpenDota parses so the archive ends up holding
+     * parsed bodies. {@code null} when no players are watched or auto-parse is off (then the archive stays
+     * read-only). Owned here — closed by {@link #close} and its background poll started by
+     * {@link #startWatchedParsePoll}.
+     */
+    private final WatchedAutoParser autoParser;
 
     // --- counters (spec §8) ---
     private final AtomicLong l2Hit = new AtomicLong();
@@ -88,6 +95,23 @@ public final class L2CachingGateway implements AutoCloseable {
         this.store = store;
         this.config = config;
         this.watchedPattern = buildWatchedPattern(config.watchedAccountIds());
+        // Auto-parse is active only when players are watched AND it is enabled (on by default). The poll
+        // is NOT started here — startWatchedParsePoll() does that from SidecarMain, so unit tests that
+        // construct a gateway never spawn a background thread.
+        this.autoParser = (watchedPattern != null && config.watchedAutoParse())
+                ? new WatchedAutoParser(client, config.watchedAccountIds(), config.watchedParsePollMillis())
+                : null;
+    }
+
+    /**
+     * Start the proactive watched-match parse poll, if auto-parse is configured (else a no-op). Called once
+     * by {@code SidecarMain} after the gateway is built; separated from the constructor so unit tests don't
+     * spin up the background poll thread.
+     */
+    public void startWatchedParsePoll() {
+        if (autoParser != null) {
+            autoParser.start();
+        }
     }
 
     /**
@@ -286,6 +310,12 @@ public final class L2CachingGateway implements AutoCloseable {
                 // retry-after. A null stamp on an unparsed pinned row is treated as "due now" by lookup().
                 expiresAt = (parsed || refetchMs <= 0) ? null : now + refetchMs;
                 patchId = null;
+                // Access-driven auto-parse (spec §6.5): ask OpenDota to parse this watched match if it
+                // isn't yet, so the next re-check upgrades the archived row to the parsed body. Deduped
+                // and best-effort inside the auto-parser; a GET on a match never triggers a parse on its own.
+                if (!parsed && autoParser != null) {
+                    autoParser.requestParse(matchIdOf(path));
+                }
             } else {
                 if (isMatch && !parsed) {
                     // Unparsed, non-watched match. If a PINNED row exists at this key its player is no
@@ -565,6 +595,11 @@ public final class L2CachingGateway implements AutoCloseable {
         return q >= 0 ? path.substring(0, q) : path;
     }
 
+    /** The numeric match id of a {@code /matches/{id}} path (only called after MATCH_ID has matched). */
+    private static long matchIdOf(String path) {
+        return Long.parseLong(stripQuery(path).substring("/matches/".length()));
+    }
+
     private void recordError(String op, String path, SQLException ex) {
         l2Error.incrementAndGet();
         LOG.log(Level.WARNING, ex, () -> op + " failed for " + path + " (L2 degraded to passthrough): "
@@ -576,27 +611,39 @@ public final class L2CachingGateway implements AutoCloseable {
      * counts PINNED <em>store operations</em>, not distinct matches — an unparsed watched match is re-stored
      * on each access until it parses (see the upgrade path in {@link #maybeStore}), so this can exceed the
      * number of archived matches. {@code pinnedRows}/{@code pinnedBytes} are the store's current watched-
-     * archive totals (the durable, deduplicated size of the archive against its budget).
+     * archive totals (the durable, deduplicated size of the archive against its budget). {@code parseRequested}
+     * /{@code parseErrors} count auto-parse requests issued / failed (both {@code 0} when auto-parse is off).
      */
     public record L2Stats(long l2Hit, long l2Miss, long l2Store, long l2WatchedStore,
                           long l2StoreSkippedUnparsed, long l2PatchBust, long l2Error, long noStore,
-                          long pinnedRows, long pinnedBytes) {
+                          long pinnedRows, long pinnedBytes, long parseRequested, long parseErrors) {
     }
 
     /** Snapshot the current counters. */
     public L2Stats stats() {
         return new L2Stats(l2Hit.get(), l2Miss.get(), l2Store.get(), l2WatchedStore.get(),
                 l2StoreSkippedUnparsed.get(), l2PatchBust.get(), l2Error.get(), noStore.get(),
-                store.pinnedRowCount(), store.pinnedBodyBytes());
+                store.pinnedRowCount(), store.pinnedBodyBytes(),
+                autoParser == null ? 0L : autoParser.parseRequested(),
+                autoParser == null ? 0L : autoParser.parseErrors());
     }
 
-    /** Close the SQLite store and the wrapped client (mirrors the server→client close chain). */
+    /**
+     * Close the auto-parser (stopping its poll), the SQLite store, and the wrapped client (mirrors the
+     * server→client close chain).
+     */
     @Override
     public void close() {
         try {
-            store.close();
+            if (autoParser != null) {
+                autoParser.close();
+            }
         } finally {
-            client.close();
+            try {
+                store.close();
+            } finally {
+                client.close();
+            }
         }
     }
 }
