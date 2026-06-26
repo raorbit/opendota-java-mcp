@@ -48,6 +48,14 @@ class L2ConfigTest {
     }
 
     @Test
+    void skipsNonPositiveIdsIncludingTheAnonymizedSentinelZero() {
+        // 0 is OpenDota's anonymized-player sentinel and negatives are not valid Steam32 ids; both are
+        // dropped so a watched-set can never pin every anonymized match.
+        assertThat(L2Config.parseWatchedPlayers("0,-5,111,222"))
+                .containsExactly(111L, 222L);
+    }
+
+    @Test
     void nullOrBlankYieldsEmptyUnmodifiableSet() {
         assertThat(L2Config.parseWatchedPlayers(null)).isEmpty();
         assertThat(L2Config.parseWatchedPlayers("   ")).isEmpty();

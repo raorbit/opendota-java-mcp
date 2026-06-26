@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Gate tests for the durable L2 cache tier (see {@code docs/l2-cache-design.md} §10).
@@ -671,6 +672,8 @@ class L2CachingGatewayTest {
             assertThat(gw.stats().l2WatchedStore()).isEqualTo(1);
             assertThat(gw.stats().l2StoreSkippedUnparsed()).as("watched bypasses the unparsed skip").isZero();
             assertThat(gw.stats().pinnedRows()).isEqualTo(1);
+            assertThat(gw.stats().pinnedBytes())
+                    .isEqualTo(WATCHED_MATCH_UNPARSED.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
         }
     }
 
@@ -695,12 +698,35 @@ class L2CachingGatewayTest {
             assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
             assertThat(client.calls.get()).isEqualTo(3);
             assertThat(store.rowCount()).isEqualTo(1);   // upgraded in place, not stacked
+            // The durable body was actually replaced by the parsed one (not just any parsed-looking body).
+            assertThat(store.get("/matches/777").body()).isEqualTo(WATCHED_MATCH_PARSED);
 
             assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
             assertThat(client.calls.get()).as("parsed PINNED now serves from L2").isEqualTo(3);
             assertThat(gw.stats().l2Hit()).isEqualTo(1);
             L2Store.Entry e = store.get("/matches/777");
             assertThat(e.classification()).isEqualTo("PINNED");
+        }
+    }
+
+    // ---- W2b: an upstream failure during the unparsed re-fetch serves the retained unparsed body ----
+    @Test
+    void unparsedPinnedReFetchFailureServesRetainedBody(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID)))) {
+            // 1st get archives the unparsed body PINNED.
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+
+            // Upstream now fails (drop the canned body → getJson throws 404). The forced re-fetch of the
+            // unparsed PINNED row fails, but the retained body is served rather than propagating the error.
+            client.bodies.remove("/matches/777");
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(gw.stats().l2Hit()).as("served from the archive after the re-fetch failed").isEqualTo(1);
+
+            // A non-archived path with no stored row still propagates the upstream error.
+            assertThatThrownBy(() -> gw.get("/matches/999")).isInstanceOf(OpenDotaException.class);
         }
     }
 

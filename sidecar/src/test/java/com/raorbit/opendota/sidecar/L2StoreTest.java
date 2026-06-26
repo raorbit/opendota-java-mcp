@@ -347,6 +347,46 @@ class L2StoreTest {
     }
 
     @Test
+    void enforceCapsMainByteCapCountsNonPinnedOnly(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // 12 pinned bytes + 1 non-pinned byte. With maxBytes=8 the main byte cap is on NON-pinned
+            // bytes only (1 <= 8), so nothing is evicted. If the `- pinnedBytes` term were dropped the
+            // total (13) would exceed 8 and the lone non-pinned row would be wrongly evicted — this test
+            // fails under that mutation.
+            store.put("/matches/1", "aaaa", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "bbbb", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/3", "cccc", Classification.PINNED, 120, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/a", "z", Classification.PERMANENT, 200, null, L2Store.SCHEMA_VERSION, null);
+
+            assertThat(store.enforceCaps(1L << 40, 8, 0, 0, 1_000_000L)).isZero();
+            assertThat(store.get("/a")).as("the non-pinned row is under the non-pinned byte cap").isNotNull();
+            assertThat(store.pinnedRowCount()).isEqualTo(3);
+            assertThat(store.rowCount()).isEqualTo(4);
+        }
+    }
+
+    @Test
+    void enforceCapsWatchedByteCapEvictsMultiplePinnedRowsUntilUnderBudget(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // Three 4-byte pinned bodies = 12 bytes; a 4-byte budget forces TWO evictions (12->8->4),
+            // exercising the byte loop's multi-iteration path and its termination.
+            store.put("/matches/1", "aaaa", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "bbbb", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/3", "cccc", Classification.PINNED, 120, null, L2Store.SCHEMA_VERSION, null);
+
+            int evicted = store.enforceCaps(1L << 40, 1L << 40, 0, 4, 1_000_000L);
+            assertThat(evicted).isEqualTo(2);
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+            assertThat(store.pinnedBodyBytes()).isEqualTo(4);
+            assertThat(store.get("/matches/1")).isNull();
+            assertThat(store.get("/matches/2")).isNull();
+            assertThat(store.get("/matches/3")).as("only the newest pinned row survives").isNotNull();
+        }
+    }
+
+    @Test
     void enforceCapsWithUnlimitedWatchedBudgetNeverEvictsPinned(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
         try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
