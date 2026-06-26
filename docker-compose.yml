@@ -23,6 +23,14 @@ services:
       OPENDOTA_SIDECAR_BIND: "0.0.0.0"
       OPENDOTA_SIDECAR_L2: "true"
       OPENDOTA_SIDECAR_L2_DB: "/data/l2-cache.db"
+      # Watched-player archive (all optional; blank = feature off / sensible defaults). Forwarded
+      # from .env so the archive can be configured without editing this file.
+      OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS: "${OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS:-}"
+      OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS: "${OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS:-}"
+      OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES: "${OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES:-}"
+      OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS: "${OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS:-}"
+      OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE: "${OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE:-}"
+      OPENDOTA_SIDECAR_L2_WATCHED_PARSE_POLL_MILLIS: "${OPENDOTA_SIDECAR_L2_WATCHED_PARSE_POLL_MILLIS:-}"
     ports:
       # Host-facing exposure is loopback-only. NOTE: container peers on the network below
       # reach :31337 DIRECTLY, bypassing this publish — so OPENDOTA_SIDECAR_TOKEN is REQUIRED.
