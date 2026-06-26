@@ -58,6 +58,10 @@ public final class L2Config {
     private static final String WATCHED_MAX_BYTES_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES";
     private static final String WATCHED_REFETCH_PROP = "opendota.sidecar.l2.watchedRefetchMillis";
     private static final String WATCHED_REFETCH_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS";
+    private static final String WATCHED_AUTO_PARSE_PROP = "opendota.sidecar.l2.watchedAutoParse";
+    private static final String WATCHED_AUTO_PARSE_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE";
+    private static final String WATCHED_PARSE_POLL_PROP = "opendota.sidecar.l2.watchedParsePollMillis";
+    private static final String WATCHED_PARSE_POLL_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_PARSE_POLL_MILLIS";
 
     /** Default cap: 50,000 rows (spec §6.4). */
     static final int DEFAULT_MAX_ROWS = 50_000;
@@ -71,6 +75,8 @@ public final class L2Config {
      * not (yet) parsed is re-fetched at most hourly rather than on every access.
      */
     static final long DEFAULT_WATCHED_REFETCH_MILLIS = Duration.ofHours(1).toMillis();
+    /** Default cadence of the proactive watched-match parse poll (spec §6.5). */
+    static final long DEFAULT_WATCHED_PARSE_POLL_MILLIS = Duration.ofHours(1).toMillis();
     /** Default db filename under {@code ${user.home}/.opendota-sidecar/} (spec §6.1). */
     private static final String DEFAULT_DB_DIR = ".opendota-sidecar";
     private static final String DEFAULT_DB_FILE = "l2-cache.db";
@@ -102,6 +108,8 @@ public final class L2Config {
     private final int readPoolSize;
     private final Watched watched;
     private final long watchedRefetchMillis;
+    private final boolean watchedAutoParse;
+    private final long watchedParsePollMillis;
 
     public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride) {
         this(dbPath, maxRows, maxBytes, patchCheckMillis, patchIdOverride, L2Store.DEFAULT_READ_POOL, Watched.NONE);
@@ -120,6 +128,13 @@ public final class L2Config {
 
     public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride,
                     int readPoolSize, Watched watched, long watchedRefetchMillis) {
+        this(dbPath, maxRows, maxBytes, patchCheckMillis, patchIdOverride, readPoolSize, watched,
+                watchedRefetchMillis, true, DEFAULT_WATCHED_PARSE_POLL_MILLIS);
+    }
+
+    public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride,
+                    int readPoolSize, Watched watched, long watchedRefetchMillis, boolean watchedAutoParse,
+                    long watchedParsePollMillis) {
         this.dbPath = dbPath;
         this.maxRows = maxRows;
         this.maxBytes = maxBytes;
@@ -130,6 +145,8 @@ public final class L2Config {
         // 0 is allowed (and used in tests) to mean "re-fetch on every access" — the pre-retry-after
         // behaviour; negative is coerced to 0.
         this.watchedRefetchMillis = Math.max(0L, watchedRefetchMillis);
+        this.watchedAutoParse = watchedAutoParse;
+        this.watchedParsePollMillis = watchedParsePollMillis;
     }
 
     /** Whether the L2 tier is enabled via {@code OPENDOTA_SIDECAR_L2=true} / {@code -Dopendota.sidecar.l2=true}. */
@@ -171,7 +188,30 @@ public final class L2Config {
                 trimToNull(resolve(PATCH_ID_PROP, PATCH_ID_ENV, null)),
                 resolveInt(READ_POOL_PROP, READ_POOL_ENV, L2Store.DEFAULT_READ_POOL),
                 watched,
-                resolveRefetch(WATCHED_REFETCH_PROP, WATCHED_REFETCH_ENV, DEFAULT_WATCHED_REFETCH_MILLIS));
+                resolveRefetch(WATCHED_REFETCH_PROP, WATCHED_REFETCH_ENV, DEFAULT_WATCHED_REFETCH_MILLIS),
+                resolveBoolDefaultTrue(WATCHED_AUTO_PARSE_PROP, WATCHED_AUTO_PARSE_ENV),
+                resolveLong(WATCHED_PARSE_POLL_PROP, WATCHED_PARSE_POLL_ENV, DEFAULT_WATCHED_PARSE_POLL_MILLIS));
+    }
+
+    /**
+     * Resolve a boolean knob that defaults to {@code true} when unset (so auto-parse is on by default when
+     * watched players are configured). Accepts the same truthy/falsy spellings as {@link #isTruthy}; an
+     * unrecognized non-blank value warns and stays on.
+     */
+    static boolean resolveBoolDefaultTrue(String prop, String env) {
+        String raw = trimToNull(resolve(prop, env, null));
+        if (raw == null) {
+            return true;
+        }
+        switch (raw.toLowerCase(Locale.ROOT)) {
+            case "true": case "1": case "yes": case "on":
+                return true;
+            case "false": case "0": case "no": case "off":
+                return false;
+            default:
+                LOG.warning(() -> "L2 config " + prop + "='" + raw + "' is not a recognized boolean; leaving on");
+                return true;
+        }
     }
 
     /**
@@ -262,6 +302,19 @@ public final class L2Config {
      */
     public long watchedRefetchMillis() {
         return watchedRefetchMillis;
+    }
+
+    /**
+     * Whether the sidecar automatically requests parses of watched players' unparsed matches (spec §6.5).
+     * On by default when watched players are configured; the archive stays read-only when off.
+     */
+    public boolean watchedAutoParse() {
+        return watchedAutoParse;
+    }
+
+    /** Cadence (ms) of the proactive watched-match parse poll. */
+    public long watchedParsePollMillis() {
+        return watchedParsePollMillis;
     }
 
     private static Path resolveDbPath() {

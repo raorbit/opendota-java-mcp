@@ -348,6 +348,14 @@ Behaviour:
 - A match whose body mentions a watched `account_id` is stored as a **PINNED** row: permanent, and
   **exempt from the main cache cap** — a growing archive never evicts your ordinary cached data, and
   vice-versa.
+- **Auto-parse.** So watched players' matches actually become *parsed* (a plain `GET` never triggers a
+  parse), the sidecar requests parses of their unparsed matches under its own key — on by default when
+  watching (`OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE=false` to turn it off). Two triggers: **access-driven**
+  (when a watched match is fetched and is unparsed) and a **background poll** that periodically lists each
+  watched player's recent matches and parses any unparsed ones, even if never fetched
+  (`OPENDOTA_SIDECAR_L2_WATCHED_PARSE_POLL_MILLIS`, default 1h). Each match is requested at most once;
+  a parse request costs ~10× a normal call. Only currently-parseable, recent matches can be parsed
+  (replays expire), and the poll scans each player's last ~100 matches — it is not a full-history backfill.
 - **Save now, upgrade later.** A watched match is archived immediately even if OpenDota hasn't parsed
   the replay yet. The sidecar serves it from L2 and re-checks upstream for the parsed body **at most
   once per hour** (tunable via `OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS`), upgrading the stored row

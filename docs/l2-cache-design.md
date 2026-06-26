@@ -383,6 +383,8 @@ backfill of a player's history, and `/players/{id}` history endpoints are TTL, n
 | `opendota.sidecar.l2.watchedMaxRows` / `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` | `0` (unlimited) | Max archived (PINNED) rows; `0`/blank/`unlimited`/`none`/`never` = never delete. |
 | `opendota.sidecar.l2.watchedMaxBytes` / `OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES` | `0` (unlimited) | Max archived body bytes; same `0`/keyword = unlimited semantics. |
 | `opendota.sidecar.l2.watchedRefetchMillis` / `OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS` | `3600000` (1h) | How long an unparsed archived match is served from L2 before re-checking upstream for the parsed body. `0` = re-fetch on every access. |
+| `opendota.sidecar.l2.watchedAutoParse` / `OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE` | `true` | Whether the sidecar auto-requests parses of watched players' unparsed matches (`POST /request/{id}`). `false` keeps the archive read-only. |
+| `opendota.sidecar.l2.watchedParsePollMillis` / `OPENDOTA_SIDECAR_L2_WATCHED_PARSE_POLL_MILLIS` | `3600000` (1h) | Cadence of the proactive poll that lists each watched player's recent matches and requests parses for unparsed ones. |
 
 The cap resolver deliberately differs from the main caps: `0` (and the keywords) means *unlimited*
 (the default — "never delete"), whereas the main `maxRows`/`maxBytes` reject `<= 0` and fall back to
@@ -430,6 +432,26 @@ budget until manual cleanup or a `SCHEMA_VERSION` rebuild. This is intentional: 
 forever regardless of who is watched, so there is no correctness reason to evict it, only a budget one.
 (A parsed match that *is* re-fetched while un-watched — e.g. an L2 miss — overwrites the row as PERMANENT
 via `put`, which nets the class transition; but a parsed PINNED hit is never re-fetched in the first place.)
+
+**Auto-parse (`WatchedAutoParser`).** A `GET /matches/{id}` never *causes* a parse — OpenDota only parses
+on `POST /request/{id}`. So that watched matches actually become parsed (not just detected-as-parsed),
+the sidecar issues those parse requests itself, under its own key, via `WatchedAutoParser`. It is on by
+default when watching (`OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE`, default `true`); when off the archive is
+purely read-only. Two triggers share one process-lifetime dedup set (a match is requested at most once;
+a failed request is dropped from the set so a later poll retries):
+- **Access-driven**: `maybeStore` calls `requestParse(matchId)` when it stores an unparsed watched match,
+  so a fetched match gets queued for parsing and the retry-after re-check upgrades it.
+- **Proactive poll** (`pollOnce`, scheduled every `OPENDOTA_SIDECAR_L2_WATCHED_PARSE_POLL_MILLIS`, default
+  1h, on a daemon thread started by `SidecarMain` — never by the gateway constructor, so unit tests don't
+  spawn it): lists each watched player's recent matches (`/players/{id}/matches?project=version&limit=100`,
+  parsed with a dep-free regex like the rest of the L2 path) and requests a parse for any with
+  `"version": null`. This covers matches no agent ever fetches by id.
+
+Scope: only currently-parseable matches can be parsed (replays expire after ~2 weeks) and the poll scans
+each player's most recent ~100 matches, so "all matches" means *all recent, currently-parseable* matches,
+not a full-history backfill. Best-effort throughout: a parse request or listing failure is counted
+(`parseRequested`/`parseErrors` on `/stats`) and never fails the triggering request. Parse cost is ~10× a
+normal call against the rate budget.
 
 **Two-tier eviction** (the key change). `enforceCaps(maxRows, maxBytes, watchedMaxRows,
 watchedMaxBytes, now)`:
