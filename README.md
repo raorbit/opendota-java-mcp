@@ -355,7 +355,9 @@ Behaviour:
   one per access. A parsed match serves straight from L2; and if a re-check fails while the match is
   still unparsed, the retained body is served rather than failing the request.
 - **Un-watch reclaims.** Removing a player from the watch list lets the sidecar drop their archived
-  unparsed matches (on the next access) so they stop counting against the watched budget.
+  *unparsed* matches (on the next access) so they stop counting against the watched budget. Already-parsed
+  archived matches stay pinned (they serve correct, immutable data and are never re-fetched), so they keep
+  counting against the budget until manual cleanup or a schema rebuild.
 - **Its own budget.** `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` / `…_WATCHED_MAX_BYTES` cap the archive;
   the default (blank or `0`, also spellable `unlimited`/`none`/`never`) means **never delete**. Set a
   positive limit and the oldest archived matches evict first, only against this budget.

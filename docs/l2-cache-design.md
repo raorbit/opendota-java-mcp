@@ -418,11 +418,18 @@ L2.
 failing the request — the archive's data survives an upstream outage. (An ordinary miss with no stored
 row still propagates its error.)
 
-**Un-watch reclamation.** When an unparsed PINNED row's retry-after elapses and the re-fetched body no
-longer matches the (possibly changed or empty) watched pattern, `maybeStore` calls `store.deletePinned`
-to drop the orphaned row, so an un-watched player's archived matches stop counting against the watched
-budget within one interval of the next access. (A parsed un-watched match instead overwrites the row as
-PERMANENT via `put`, which nets the class transition.)
+**Un-watch reclamation.** Reclamation is **partial** — it only covers archived matches that are still
+**unparsed**. When an *unparsed* PINNED row's retry-after elapses and the re-fetched body no longer
+matches the (possibly changed or empty) watched pattern, `maybeStore` calls `store.deletePinned` to drop
+the orphaned row, so an un-watched player's *unparsed* archived matches stop counting against the watched
+budget within one interval of the next access. An already-**parsed** archived match, by contrast, stays
+PINNED even after its player is un-watched: a parsed PINNED row has `expires_at = NULL`, so `lookup()`
+never force-misses it — it serves straight from L2 (correct, immutable data) and the body is never
+re-fetched, so the watched-pattern is never re-evaluated. Such a row keeps counting against the watched
+budget until manual cleanup or a `SCHEMA_VERSION` rebuild. This is intentional: a parsed match is correct
+forever regardless of who is watched, so there is no correctness reason to evict it, only a budget one.
+(A parsed match that *is* re-fetched while un-watched — e.g. an L2 miss — overwrites the row as PERMANENT
+via `put`, which nets the class transition; but a parsed PINNED hit is never re-fetched in the first place.)
 
 **Two-tier eviction** (the key change). `enforceCaps(maxRows, maxBytes, watchedMaxRows,
 watchedMaxBytes, now)`:

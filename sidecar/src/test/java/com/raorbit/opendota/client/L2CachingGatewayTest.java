@@ -793,6 +793,44 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- W2e: with a positive interval, an orphan is SERVED until its stamp elapses, then reclaimed ----
+    @Test
+    void unwatchedUnparsedPinnedRowIsServedUntilStampElapsesThenReclaimed(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        // First run: the player IS watched and the re-fetch interval is POSITIVE, so the archived unparsed
+        // row carries a FUTURE expires_at re-fetch stamp (not a "due now" null stamp).
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, watching(WATCHED_ID), Duration.ofHours(1).toMillis()))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            L2Store.Entry stamped = store.get("/matches/777");
+            assertThat(stamped.classification()).isEqualTo("PINNED");
+            assertThat(stamped.expiresAt()).as("a future re-fetch stamp is live").isNotNull();
+            assertThat(stamped.expiresAt()).isGreaterThan(System.currentTimeMillis());
+        }
+
+        // Second run over the SAME db, now UN-WATCHED. While the stamp is still live, lookup() SERVES the
+        // orphan straight from L2 (no force-miss, so the reclaim path does not run yet): the row stays put.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, L2Config.Watched.NONE,
+                     Duration.ofHours(1).toMillis()))) {
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+            assertThat(gw.get("/matches/777")).as("served from L2 while the stamp is live").isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(gw.stats().l2Hit()).isEqualTo(1);
+            assertThat(store.get("/matches/777")).as("orphan still present (not reclaimed while served)").isNotNull();
+            assertThat(store.pinnedRowCount()).as("still pinned while the stamp is live").isEqualTo(1);
+
+            // Now expire the stamp (push expires_at into the past, keeping it PINNED/unparsed). The next
+            // access force-misses, re-fetches (still unparsed, no longer watched), and reclaims the orphan.
+            store.put("/matches/777", WATCHED_MATCH_UNPARSED,
+                    com.raorbit.opendota.sidecar.Classification.PINNED, 100, 1L, L2Store.SCHEMA_VERSION, null);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(store.get("/matches/777")).as("orphan reclaimed once the stamp elapsed").isNull();
+            assertThat(store.pinnedRowCount()).isZero();
+        }
+    }
+
     // ---- W3: a parsed watched match serves straight from L2 on the 2nd get ----
     @Test
     void parsedWatchedMatchServesFromL2(@TempDir Path tmp) throws Exception {
