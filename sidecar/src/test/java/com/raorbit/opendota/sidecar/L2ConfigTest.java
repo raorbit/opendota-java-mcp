@@ -21,12 +21,18 @@ class L2ConfigTest {
     private static final String CAP_PROP = "opendota.sidecar.l2.watchedMaxRows";
     private static final String REFETCH_PROP = "opendota.sidecar.l2.watchedRefetchMillis";
     private static final String REFETCH_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS";
+    private static final String AUTO_PARSE_PROP = "opendota.sidecar.l2.watchedAutoParse";
+    private static final String AUTO_PARSE_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE";
+    private static final String POLL_PROP = "opendota.sidecar.l2.watchedParsePollMillis";
+    private static final String POLL_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_PARSE_POLL_MILLIS";
 
     @BeforeEach
     @AfterEach
     void clearProperties() {
         System.clearProperty(CAP_PROP);
         System.clearProperty(REFETCH_PROP);
+        System.clearProperty(AUTO_PARSE_PROP);
+        System.clearProperty(POLL_PROP);
     }
 
     // ---- parseWatchedPlayers ----
@@ -143,6 +149,40 @@ class L2ConfigTest {
         assumeTrue(System.getenv(REFETCH_ENV) == null);
         assertThat(L2Config.fromEnvironment().watchedRefetchMillis())
                 .isEqualTo(L2Config.DEFAULT_WATCHED_REFETCH_MILLIS);
+    }
+
+    // ---- auto-parse + poll cadence via fromEnvironment() ----
+
+    @Test
+    void fromEnvironmentAutoParseDefaultsOnWhenUnset() {
+        assumeTrue(System.getenv(AUTO_PARSE_ENV) == null);
+        assertThat(L2Config.fromEnvironment().watchedAutoParse()).isTrue();
+    }
+
+    @Test
+    void fromEnvironmentAutoParseCanBeDisabled() {
+        System.setProperty(AUTO_PARSE_PROP, "false");
+        assertThat(L2Config.fromEnvironment().watchedAutoParse()).isFalse();
+        System.setProperty(AUTO_PARSE_PROP, "off");
+        assertThat(L2Config.fromEnvironment().watchedAutoParse()).isFalse();
+        System.setProperty(AUTO_PARSE_PROP, "true");
+        assertThat(L2Config.fromEnvironment().watchedAutoParse()).isTrue();
+    }
+
+    @Test
+    void fromEnvironmentParsePollMillisDefaultAndSettable() {
+        assumeTrue(System.getenv(POLL_ENV) == null);
+        assertThat(L2Config.fromEnvironment().watchedParsePollMillis())
+                .isEqualTo(L2Config.DEFAULT_WATCHED_PARSE_POLL_MILLIS);
+        System.setProperty(POLL_PROP, "900000");
+        assertThat(L2Config.fromEnvironment().watchedParsePollMillis()).isEqualTo(900_000L);
+    }
+
+    @Test
+    void resolveBoolDefaultTrueUnrecognizedStaysOn() {
+        assumeTrue(System.getenv(AUTO_PARSE_ENV) == null);
+        System.setProperty(AUTO_PARSE_PROP, "maybe");
+        assertThat(L2Config.resolveBoolDefaultTrue(AUTO_PARSE_PROP, AUTO_PARSE_ENV)).isTrue();
     }
 
     // ---- Watched record + legacy constructors ----

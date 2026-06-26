@@ -16,6 +16,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -91,6 +92,8 @@ class L2CachingGatewayTest {
         final Map<String, String> bodies = new ConcurrentHashMap<>();
         final AtomicInteger calls = new AtomicInteger();
         final List<String> requested = new ArrayList<>();
+        /** Paths POSTed (parse requests), in order, so a test can assert auto-parse behaviour. */
+        final List<String> posts = new CopyOnWriteArrayList<>();
         /** Optional gate: when set, getJson blocks on it (to force concurrent in-flight overlap). */
         volatile CountDownLatch gate;
 
@@ -123,6 +126,13 @@ class L2CachingGatewayTest {
             }
             return body;
         }
+
+        @Override
+        public String postJson(String path) {
+            // Record the parse request; never touch real transport.
+            posts.add(path);
+            return "{\"job\":{\"jobId\":1}}";
+        }
     }
 
     private static L2Config config(Path db) {
@@ -140,9 +150,17 @@ class L2CachingGatewayTest {
     }
 
     private static L2Config config(Path db, L2Config.Watched watched, long watchedRefetchMillis) {
-        // Read-pool size 4 mirrors L2Store.DEFAULT_READ_POOL (package-private, not visible here).
+        // Auto-parse OFF by default for the watched tests, so they don't issue parse requests; the
+        // auto-parse behaviour is exercised in its own tests via the overload below.
+        return config(db, watched, watchedRefetchMillis, false);
+    }
+
+    private static L2Config config(Path db, L2Config.Watched watched, long watchedRefetchMillis,
+                                   boolean autoParse) {
+        // Read-pool size 4 mirrors L2Store.DEFAULT_READ_POOL (package-private, not visible here). Poll
+        // cadence is irrelevant to these tests (the poll thread is never started here).
         return new L2Config(db, 50_000, 512L * 1024 * 1024, Duration.ofHours(6).toMillis(), null, 4, watched,
-                watchedRefetchMillis);
+                watchedRefetchMillis, autoParse, Duration.ofHours(1).toMillis());
     }
 
     private static long countRows(Path db) throws SQLException {
@@ -920,6 +938,57 @@ class L2CachingGatewayTest {
             assertThat(store.get("/matches/701")).isNull();
             assertThat(store.get("/matches/703")).isNotNull();
             assertThat(store.get("/matches/800")).as("ordinary cache is governed by the main cap, not watched").isNotNull();
+        }
+    }
+
+    // ---- W8: access-driven auto-parse requests a parse for an unparsed watched match (deduped) ----
+    @Test
+    void accessDrivenAutoParseRequestsParseForUnparsedWatchedMatchOnce(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        // Auto-parse ON; refetch interval 0 so every access force-misses (the dedup, not the stamp, must
+        // prevent a second parse request).
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, watching(WATCHED_ID), 0L, true))) {
+            gw.get("/matches/777");
+            assertThat(client.posts).containsExactly("/request/777");
+            assertThat(gw.stats().parseRequested()).isEqualTo(1);
+
+            // A second fetch (still unparsed) re-stores but must NOT request a second parse — deduped.
+            gw.get("/matches/777");
+            assertThat(client.posts).as("parse requested at most once per match").containsExactly("/request/777");
+            assertThat(gw.stats().parseRequested()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void accessDrivenAutoParseDoesNotFireForParsedOrNonWatchedOrWhenOff(@TempDir Path tmp) throws Exception {
+        // (a) parsed watched match -> nothing to parse.
+        Path a = tmp.resolve("a.db");
+        CountingClient c1 = new CountingClient().with("/matches/777", WATCHED_MATCH_PARSED);
+        try (L2Store store = new L2Store(a, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(c1, store, config(a, watching(WATCHED_ID), 0L, true))) {
+            gw.get("/matches/777");
+            assertThat(c1.posts).isEmpty();
+            assertThat(gw.stats().parseRequested()).isZero();
+        }
+        // (b) unparsed NON-watched match -> not our player, no parse.
+        Path b = tmp.resolve("b.db");
+        CountingClient c2 = new CountingClient().with("/matches/111", UNPARSED_MATCH);
+        try (L2Store store = new L2Store(b, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(c2, store, config(b, watching(999999L), 0L, true))) {
+            gw.get("/matches/111");
+            assertThat(c2.posts).isEmpty();
+        }
+        // (c) auto-parse OFF -> even an unparsed watched match is never parsed.
+        Path d = tmp.resolve("d.db");
+        CountingClient c3 = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        try (L2Store store = new L2Store(d, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(c3, store, config(d, watching(WATCHED_ID), 0L, false))) {
+            gw.get("/matches/777");
+            assertThat(c3.posts).isEmpty();
+            assertThat(gw.stats().parseRequested()).isZero();
         }
     }
 
