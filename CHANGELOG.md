@@ -12,8 +12,11 @@ All notable changes to **opendota-mcp** are documented here. The format follows
   not a history backfill) — governed by its own retention budget separate from the ordinary cache cap. Set `OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS` (comma-separated Steam32 `account_id`s)
   with optional `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` / `…_WATCHED_MAX_BYTES` caps (default unlimited =
   never delete). Watched matches are stored as a new `PINNED` class — exempt from the main cap, saved
-  immediately even when unparsed, and re-fetched until parsed (then upgraded in place). New `/stats`
-  counters: `l2WatchedStore`, `pinnedRows`, `pinnedBytes`.
+  immediately even when unparsed, then served from L2 and re-checked upstream for the parsed body at
+  most once per hour (tunable via `OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS`), upgrading in place once
+  it parses; a failed re-check serves the retained body rather than erroring. Un-watching a player
+  reclaims their archived unparsed matches on next access. New `/stats` counters: `l2WatchedStore`,
+  `pinnedRows`, `pinnedBytes`.
 - **Sidecar write forwarding.** The shared sidecar now forwards write requests (`POST /api/*` — parse
   requests / player refreshes) to OpenDota under its key, alongside the existing `GET` proxying. Writes
   bypass the cache and are rate-limited like any other call; the token gate (when set) applies to them

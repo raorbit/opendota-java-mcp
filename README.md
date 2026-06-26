@@ -349,11 +349,13 @@ Behaviour:
   **exempt from the main cache cap** — a growing archive never evicts your ordinary cached data, and
   vice-versa.
 - **Save now, upgrade later.** A watched match is archived immediately even if OpenDota hasn't parsed
-  the replay yet; the sidecar keeps re-fetching it on access until it parses, then stores the parsed
-  body in place. A parsed match serves straight from L2. (Two caveats for a match OpenDota never parses
-  — e.g. its replay expired: it keeps re-fetching on every access, costing a little rate-limit budget;
-  and if a re-fetch fails while it is still unparsed, the sidecar serves the retained unparsed body
-  rather than failing the request.)
+  the replay yet. The sidecar serves it from L2 and re-checks upstream for the parsed body **at most
+  once per hour** (tunable via `OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS`), upgrading the stored row
+  in place once it parses — so a match OpenDota never parses costs at most one re-fetch per hour, not
+  one per access. A parsed match serves straight from L2; and if a re-check fails while the match is
+  still unparsed, the retained body is served rather than failing the request.
+- **Un-watch reclaims.** Removing a player from the watch list lets the sidecar drop their archived
+  unparsed matches (on the next access) so they stop counting against the watched budget.
 - **Its own budget.** `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` / `…_WATCHED_MAX_BYTES` cap the archive;
   the default (blank or `0`, also spellable `unlimited`/`none`/`never`) means **never delete**. Set a
   positive limit and the oldest archived matches evict first, only against this budget.
