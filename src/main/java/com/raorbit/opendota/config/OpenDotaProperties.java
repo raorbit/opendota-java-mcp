@@ -60,14 +60,6 @@ public class OpenDotaProperties {
      */
     private String sidecarToken;
 
-    /**
-     * Mirrors {@code opendota.write-tools-enabled} (the same key that gates the {@code WriteTools} bean
-     * via {@code @ConditionalOnProperty}) so the wiring can reject the unsupported write-tools + sidecar
-     * combination at startup. The shared sidecar only proxies GETs, so writes must run on a direct
-     * (non-forwarding) server. Default {@code false}.
-     */
-    private boolean writeToolsEnabled = false;
-
     public int getCacheMaxEntries() {
         return cacheMaxEntries;
     }
@@ -138,13 +130,5 @@ public class OpenDotaProperties {
 
     public void setSidecarToken(String sidecarToken) {
         this.sidecarToken = sidecarToken;
-    }
-
-    public boolean isWriteToolsEnabled() {
-        return writeToolsEnabled;
-    }
-
-    public void setWriteToolsEnabled(boolean writeToolsEnabled) {
-        this.writeToolsEnabled = writeToolsEnabled;
     }
 }
