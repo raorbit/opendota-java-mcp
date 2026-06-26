@@ -7,7 +7,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,7 +26,7 @@ import java.util.regex.Pattern;
  *
  * <p>Two complementary triggers, sharing one dedup set so a match is requested at most once per process:
  * <ul>
- *   <li><b>Access-driven</b> ({@link #requestParse}): when {@link L2CachingGateway} fetches a watched
+ *   <li><b>Access-driven</b> ({@link #requestParseAsync}): when {@link L2CachingGateway} fetches a watched
  *       match that is still unparsed, it asks here for a parse. The gateway's hourly re-check then
  *       upgrades the archived row in place once OpenDota finishes parsing.</li>
  *   <li><b>Proactive poll</b> ({@link #pollOnce}, scheduled by {@link #start}): periodically lists each
@@ -33,9 +35,13 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>Best-effort throughout: a failed parse request (rate limit, transport) is counted and dropped from
- * the dedup set so a later poll can retry; it never propagates to the request that triggered it. A
- * {@code GET}/parse never blocks on this. Parsing of the player-matches list is a dependency-free regex
- * scan (the sidecar has no JSON library), mirroring {@link L2CachingGateway#isParsedMatch}.
+ * the dedup set so a later poll can retry; it never propagates to the request that triggered it. The
+ * access-driven path is fire-and-forget: {@link #requestParseAsync} does only the cheap dedup add on the
+ * caller (request-serving) thread and runs the actual POST — whose rate-limit park can be seconds — on a
+ * single daemon executor, so a {@code GET} never blocks on this. {@link #requestParse} itself is
+ * synchronous (POST on the calling thread); it is used by the off-thread poll and by unit tests, never on
+ * the request-serving path. Parsing of the player-matches list is a dependency-free regex scan (the
+ * sidecar has no JSON library), mirroring {@link L2CachingGateway#isParsedMatch}.
  *
  * <p>Note: OpenDota can only parse matches whose replays still exist (roughly the last couple of weeks),
  * and the poll scans only each player's most recent {@value #POLL_MATCH_LIMIT} matches, so "all matches"
@@ -65,6 +71,9 @@ public final class WatchedAutoParser implements AutoCloseable {
     private final AtomicLong parseRequested = new AtomicLong();
     private final AtomicLong parseError = new AtomicLong();
 
+    /** Single daemon thread that runs the access-driven (fire-and-forget) parse POSTs off the caller thread. */
+    private final ExecutorService parseExecutor;
+
     private ScheduledExecutorService scheduler;
 
     /**
@@ -77,16 +86,53 @@ public final class WatchedAutoParser implements AutoCloseable {
         this.client = client;
         this.watchedIds = Set.copyOf(watchedIds);
         this.pollIntervalMillis = pollIntervalMillis;
+        this.parseExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "watched-parse-exec");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     /**
-     * Request a parse of one match (the access-driven trigger), at most once per process. A failed request
-     * is dropped from the dedup set so the poll can retry it later. Never throws.
+     * Request a parse of one match <em>synchronously</em> (the POST runs on the calling thread), at most
+     * once per process. A failed request is dropped from the dedup set so the poll can retry it later.
+     * Never throws. Used by the off-thread {@link #pollOnce} sweep and by unit tests; the access-driven
+     * request-serving path uses {@link #requestParseAsync} instead so a GET never blocks on the POST.
      */
     public void requestParse(long matchId) {
         if (!requested.add(matchId)) {
             return;   // already requested (or another thread is requesting it now)
         }
+        doParse(matchId);
+    }
+
+    /**
+     * Request a parse of one match <em>fire-and-forget</em> (the access-driven trigger), at most once per
+     * process. Only the cheap, non-blocking dedup add runs on the caller (request-serving) thread; the
+     * actual POST — whose rate-limit park can be seconds — is submitted to a single daemon executor so a
+     * GET never blocks on it. A failed request is dropped from the dedup set so the poll can retry it
+     * later. Never throws.
+     */
+    public void requestParseAsync(long matchId) {
+        if (!requested.add(matchId)) {
+            return;   // already requested (or another thread is requesting it now)
+        }
+        try {
+            parseExecutor.execute(() -> doParse(matchId));
+        } catch (RejectedExecutionException e) {
+            // The executor is shutting down (close() raced this request): undo the dedup add so a later
+            // poll can retry, and drop the request silently — there is nothing to count as a parse error.
+            requested.remove(matchId);
+            LOG.log(Level.FINE, e, () -> "watched auto-parse async submit rejected for match " + matchId);
+        }
+    }
+
+    /**
+     * Issue the actual {@code POST /request/{id}} and update the counters, dropping the id from the dedup
+     * set on failure so the poll can retry. Runs on whichever thread {@link #requestParse} (caller/poll) or
+     * {@link #requestParseAsync} (the parse executor) hands it. Never throws.
+     */
+    private void doParse(long matchId) {
         try {
             client.postJson("/request/" + matchId);
             parseRequested.incrementAndGet();
@@ -162,8 +208,12 @@ public final class WatchedAutoParser implements AutoCloseable {
                 + pollIntervalMillis + "ms");
     }
 
-    /** Run one sweep, swallowing any error so the scheduled task is never cancelled by an exception. */
-    private void pollSafely() {
+    /**
+     * Run one sweep, swallowing any error so the scheduled task is never cancelled by an exception.
+     * Package-visible so a test can assert it absorbs an unchecked failure from the underlying listing
+     * (one that escapes {@link #pollOnce}'s per-player {@link OpenDotaException} catch).
+     */
+    void pollSafely() {
         try {
             pollOnce();
         } catch (RuntimeException e) {
@@ -187,5 +237,6 @@ public final class WatchedAutoParser implements AutoCloseable {
             scheduler.shutdownNow();
             scheduler = null;
         }
+        parseExecutor.shutdownNow();
     }
 }

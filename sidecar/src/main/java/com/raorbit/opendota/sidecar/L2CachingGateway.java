@@ -314,7 +314,10 @@ public final class L2CachingGateway implements AutoCloseable {
                 // isn't yet, so the next re-check upgrades the archived row to the parsed body. Deduped
                 // and best-effort inside the auto-parser; a GET on a match never triggers a parse on its own.
                 if (!parsed && autoParser != null) {
-                    autoParser.requestParse(matchIdOf(path));
+                    long id = matchIdOf(path);
+                    if (id > 0) {
+                        autoParser.requestParseAsync(id);
+                    }
                 }
             } else {
                 if (isMatch && !parsed) {
@@ -595,9 +598,18 @@ public final class L2CachingGateway implements AutoCloseable {
         return q >= 0 ? path.substring(0, q) : path;
     }
 
-    /** The numeric match id of a {@code /matches/{id}} path (only called after MATCH_ID has matched). */
+    /**
+     * The numeric match id of a {@code /matches/{id}} path (only called after MATCH_ID has matched), or
+     * {@code -1L} when the digit run overflows a {@code long} (a 20+-digit id). The caller only requests a
+     * parse when the result is positive, so an unparseable id is simply not auto-parsed rather than
+     * throwing {@link NumberFormatException} out of the request path.
+     */
     private static long matchIdOf(String path) {
-        return Long.parseLong(stripQuery(path).substring("/matches/".length()));
+        try {
+            return Long.parseLong(stripQuery(path).substring("/matches/".length()));
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
     }
 
     private void recordError(String op, String path, SQLException ex) {
