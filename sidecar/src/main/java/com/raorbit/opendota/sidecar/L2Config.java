@@ -157,8 +157,11 @@ public final class L2Config {
 
     /**
      * Parse a comma-separated list of watched Steam32 {@code account_id}s into a deduped, insertion-
-     * ordered, unmodifiable set. Blank entries are skipped; a non-numeric entry logs a warning and is
-     * skipped (the valid ids are kept). {@code null}/blank input yields an empty unmodifiable set.
+     * ordered, unmodifiable set. Blank entries are skipped; a non-numeric or non-positive entry logs a
+     * warning and is skipped (the valid ids are kept). Non-positive ids are rejected because a Steam32
+     * {@code account_id} is always positive and {@code 0} is OpenDota's anonymized-player sentinel —
+     * watching {@code 0} would pin essentially every match with an anonymized player. {@code null}/blank
+     * input yields an empty unmodifiable set.
      */
     public static Set<Long> parseWatchedPlayers(String raw) {
         String trimmed = trimToNull(raw);
@@ -172,7 +175,14 @@ public final class L2Config {
                 continue;
             }
             try {
-                ids.add(Long.parseLong(t));
+                long id = Long.parseLong(t);
+                if (id <= 0) {
+                    LOG.warning(() -> "L2 config " + WATCHED_PLAYERS_PROP + " entry '" + t
+                            + "' is not a positive Steam32 account_id (0 is the anonymized-player "
+                            + "sentinel); skipping it");
+                    continue;
+                }
+                ids.add(id);
             } catch (NumberFormatException e) {
                 LOG.warning(() -> "L2 config " + WATCHED_PLAYERS_PROP + " entry '" + t
                         + "' is not a numeric account_id; skipping it");
