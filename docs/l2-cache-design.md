@@ -285,7 +285,7 @@ A single file, default `${user.home}/.opendota-sidecar/l2-cache.db`, overridable
 CREATE TABLE IF NOT EXISTS cache_entries (
     path           TEXT    PRIMARY KEY,   -- the OpenDota path incl. query, == the L1 cache key
     body           TEXT    NOT NULL,      -- raw JSON response, verbatim (TEXT; bodies are UTF-8 JSON)
-    classification TEXT    NOT NULL,      -- 'PERMANENT' | 'TTL'  (NO_STORE never reaches here)
+    classification TEXT    NOT NULL,      -- 'PERMANENT' | 'TTL' | 'PINNED'  (NO_STORE never reaches here)
     stored_at      INTEGER NOT NULL,      -- epoch millis, for LRU-ish eviction + TTL math
     expires_at     INTEGER,               -- epoch millis for TTL rows; NULL for PERMANENT
     schema_version INTEGER NOT NULL,      -- stamped per row; lets a mismatch trigger rebuild
@@ -363,8 +363,59 @@ match history would grow the file without limit.
   still holds dead-but-hidden rows between stores — acceptable for a soft-cap tier.
 
 A single-statement bulk delete is preferred, e.g.
-`DELETE FROM cache_entries WHERE path IN (SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?)`
-with the limit computed from the overage.
+`DELETE FROM cache_entries WHERE path IN (SELECT path FROM cache_entries WHERE classification != 'PINNED' ORDER BY stored_at ASC LIMIT ?)`
+with the limit computed from the overage. The `classification != 'PINNED'` guard keeps the watched
+archive (§6.5) out of the main cap entirely.
+
+### 6.5 Watched players — a personal archive with its own budget (`PINNED`)
+
+The operator can name a set of **watched** Steam32 `account_id`s and have the sidecar permanently
+archive **every match those players appear in**, governed by its **own** retention budget that is
+independent of the ordinary cache cap (§6.4).
+
+**Configuration.** A comma-separated id list plus the archive's own row and byte caps:
+
+| Property / env | Default | Meaning |
+|----------------|---------|---------|
+| `opendota.sidecar.l2.watchedPlayers` / `OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS` | *(empty)* | Watched Steam32 `account_id`s. Empty → the feature is inert (no row is ever PINNED). |
+| `opendota.sidecar.l2.watchedMaxRows` / `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` | `0` (unlimited) | Max archived (PINNED) rows; `0`/blank/`unlimited`/`none`/`never` = never delete. |
+| `opendota.sidecar.l2.watchedMaxBytes` / `OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES` | `0` (unlimited) | Max archived body bytes; same `0`/keyword = unlimited semantics. |
+
+The cap resolver deliberately differs from the main caps: `0` (and the keywords) means *unlimited*
+(the default — "never delete"), whereas the main `maxRows`/`maxBytes` reject `<= 0` and fall back to
+their defaults. Any positive value is a hard limit on the archive.
+
+**`Classification.PINNED`** — a watched-match row: permanent (`expires_at`/`patch_id` both NULL),
+**exempt from the main cap**, and governed instead by the watched budget. It is a **store-time
+refinement** of PERMANENT: `classify(path)` stays path-based (`/matches/{id}` → PERMANENT), and the
+PINNED decision happens in `maybeStore`, which has the body and can scan it for a watched id.
+
+**Watched detection** is a dep-free regex over the opaque body (like `isParsedMatch`):
+`"account_id"\s*:\s*(id1|id2|…)(?![0-9])`. The quoted `"account_id"` key avoids suffix keys like
+`leaderboard_account_id`; the right boundary `(?![0-9])` stops `123` matching inside `1234567`.
+
+**Save now, upgrade later.** A watched match is stored PINNED **even when unparsed** (bypassing the
+§5.1 parse-gate skip), so the data is retained immediately. `lookup()` then forces a re-fetch
+(returns null) for an unparsed PINNED match, so the next access re-fetches and `INSERT OR REPLACE`
+upgrades it in place to the parsed body once OpenDota parses the replay. A parsed PINNED row hits
+normally. Pre-existing PERMANENT rows for a newly-watched player stay PERMANENT/evictable until
+re-fetched, at which point they upgrade to PINNED.
+
+**Two-tier eviction** (the key change). `enforceCaps(maxRows, maxBytes, watchedMaxRows,
+watchedMaxBytes, now)`:
+- The **main caps** govern **non-pinned** data: they are compared against `currentRows − pinnedRows`
+  / `currentBytes − pinnedBytes`, and `evictOldest` excludes PINNED rows. So a growing archive never
+  forces ordinary-cache eviction, and the main caps stay *hard* caps on ordinary data.
+- The **watched caps** govern **pinned** data via a new `evictOldestPinned`, compared against
+  `pinnedRows` / `pinnedBytes`; `0` (unlimited) is skipped. When a positive watched cap is exceeded,
+  the **oldest** archived matches evict first (by `stored_at`), only against this budget.
+
+`evictExpired` (matches `expires_at IS NOT NULL`) and `patchBust` (`classification = 'PERMANENT'`)
+both leave PINNED rows untouched by construction — pinned rows have a NULL `expires_at` and a
+distinct classification. **No `SCHEMA_VERSION` bump** is needed (the `classification` column is
+free-form TEXT). The store maintains O(1) running `pinnedRows`/`pinnedBytes` totals (seeded on open
+from a `classification = 'PINNED'` COUNT/SUM and maintained in `put`/`evictOldestPinned`, exactly
+like the global totals), so `enforceCaps` stays scan-free on the request path.
 
 ## 7. Concurrency and integration ordering
 
@@ -433,6 +484,8 @@ overwrites cleanly on the `path` primary key.
 - `l2Hit` — served from L2 without calling the client.
 - `l2Miss` — a PERMANENT or TTL path not (or no longer) in L2 (fell through to the client).
 - `l2Store` — bodies written to L2 (post parse-gate).
+- `l2WatchedStore` — watched-player matches written to L2 as PINNED (the personal archive, §6.5);
+  `pinnedRows` / `pinnedBytes` expose the archive's current size against its budget.
 - `l2StoreSkippedUnparsed` — `/matches/{id}` misses that were *not* stored because unparsed
   (the parse-gate's observability — a high value here means lots of in-flight unparsed matches).
 - `l2PatchBust` — number of patch-bust evictions performed.
