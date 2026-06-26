@@ -31,6 +31,12 @@ import java.util.logging.Logger;
  * already-redacted, length-bounded error body (a transport failure, status {@code 0},
  * becomes {@code 502}). {@code GET /health} returns {@code 200}.
  *
+ * <p>{@code POST /api/*} is forwarded to {@link OpenDotaClient#postJson} — the same rate-limited,
+ * never-cached write path the direct server uses — so a forwarding agent's opt-in write tools (parse
+ * requests / player refreshes) reach OpenDota under the sidecar's shared key. Writes always bypass the
+ * L2 durable cache (it is a GET accelerator) and go straight to the wrapped client. Any verb other than
+ * {@code GET}/{@code POST} is refused with {@code 405}.
+ *
  * <p>Handlers run on a virtual-thread-per-request executor so concurrent identical
  * requests reach the shared client at once and its single-flight can collapse them
  * into one upstream call.
@@ -82,10 +88,11 @@ public final class SidecarHttpServer implements AutoCloseable {
      * @param bindHost host/interface to bind: {@code 127.0.0.1} for loopback-only (the default), or
      *                 {@code 0.0.0.0} to accept connections across a container/network boundary
      * @param port    port to bind, or {@code 0} to pick an ephemeral one (tests)
-     * @param client  the shared upstream client (used for {@code /stats}); when {@code gateway} is
-     *                non-null the gateway owns closing it, else this server does
-     * @param gateway optional durable L2 decorator; when non-null, {@code /api} fetches route through
+     * @param client  the shared upstream client (used for {@code /stats} and the write path); when
+     *                {@code gateway} is non-null the gateway owns closing it, else this server does
+     * @param gateway optional durable L2 decorator; when non-null, {@code /api} GETs route through
      *                it instead of the bare client, and it owns closing the client + SQLite store
+     *                (POSTs always go straight to the client, never through L2)
      * @param token   optional shared secret gating {@code /api} and {@code /stats}
      */
     public SidecarHttpServer(String bindHost, int port, OpenDotaClient client, L2CachingGateway gateway,
@@ -182,7 +189,11 @@ public final class SidecarHttpServer implements AutoCloseable {
 
     private void handleApi(HttpExchange exchange) throws IOException {
         try {
-            if (!"GET".equals(exchange.getRequestMethod())) {
+            String method = exchange.getRequestMethod();
+            // GET reads and POST writes are both forwarded; any other verb is rejected outright.
+            boolean isGet = "GET".equals(method);
+            boolean isWrite = "POST".equals(method);
+            if (!isGet && !isWrite) {
                 respond(exchange, 405, "{\"error\":\"method not allowed\"}");
                 return;
             }
@@ -196,8 +207,10 @@ public final class SidecarHttpServer implements AutoCloseable {
                 return;
             }
             try {
-                // Route through the L2 decorator when enabled, else the bare client exactly as today.
-                String body = gateway != null ? gateway.get(openDotaPath) : client.getJson(openDotaPath);
+                // Writes go straight to the client's POST path (never the L2 GET cache). Reads route
+                // through the L2 decorator when enabled, else the bare client exactly as today.
+                String body = isWrite ? client.postJson(openDotaPath)
+                        : gateway != null ? gateway.get(openDotaPath) : client.getJson(openDotaPath);
                 respond(exchange, 200, body == null ? "" : body);
             } catch (OpenDotaException e) {
                 // Mirror the upstream status (a transport failure, status 0, surfaces as

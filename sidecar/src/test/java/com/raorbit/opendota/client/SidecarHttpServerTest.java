@@ -47,6 +47,8 @@ class SidecarHttpServerTest {
     private final AtomicInteger upstreamHits = new AtomicInteger();
     /** Request targets (path + raw query) the fake upstream received, in order. */
     private final List<String> upstreamReceived = new CopyOnWriteArrayList<>();
+    /** HTTP methods the fake upstream received, in order (parallel to {@link #upstreamReceived}). */
+    private final List<String> upstreamMethods = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() throws IOException {
@@ -83,6 +85,7 @@ class SidecarHttpServerTest {
             String target = exchange.getRequestURI().getRawPath();
             String query = exchange.getRequestURI().getRawQuery();
             upstreamReceived.add(query == null ? target : target + "?" + query);
+            upstreamMethods.add(exchange.getRequestMethod());
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);
             try (OutputStream os = exchange.getResponseBody()) {
@@ -95,6 +98,12 @@ class SidecarHttpServerTest {
 
     private HttpResponse<String> get(String path) throws Exception {
         return http.send(HttpRequest.newBuilder(URI.create(sidecarBase + path)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> post(String base, String path) throws Exception {
+        return http.send(
+                HttpRequest.newBuilder(URI.create(base + path)).POST(HttpRequest.BodyPublishers.noBody()).build(),
                 HttpResponse.BodyHandlers.ofString());
     }
 
@@ -188,22 +197,72 @@ class SidecarHttpServerTest {
     }
 
     @Test
-    void nonGetMethodIsRejectedWith405() throws Exception {
+    void unsupportedMethodIsRejectedWith405() throws Exception {
+        // GET and POST are both forwarded; any other verb (e.g. DELETE) is refused, as is any
+        // non-GET to /health (GET-only). The verb is rejected before reaching the shared client.
         stubUpstream("/api/heroes", 200, "[]");
 
-        HttpResponse<String> health = http.send(
-                HttpRequest.newBuilder(URI.create(sidecarBase + "/health"))
-                        .POST(HttpRequest.BodyPublishers.noBody()).build(),
-                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> health = post(sidecarBase, "/health");
         HttpResponse<String> api = http.send(
-                HttpRequest.newBuilder(URI.create(sidecarBase + "/api/heroes"))
-                        .POST(HttpRequest.BodyPublishers.noBody()).build(),
+                HttpRequest.newBuilder(URI.create(sidecarBase + "/api/heroes")).DELETE().build(),
                 HttpResponse.BodyHandlers.ofString());
 
         assertThat(health.statusCode()).isEqualTo(405);
         assertThat(api.statusCode()).isEqualTo(405);
         // The verb is rejected before reaching the shared client / upstream.
         assertThat(upstreamHits.get()).isEqualTo(0);
+    }
+
+    @Test
+    void postIsForwardedToUpstream() throws Exception {
+        // A parse request: POST /api/request/123 maps to OpenDota POST /request/123. The sidecar
+        // forwards it (via the client's POST path) and returns the body.
+        stubUpstream("/api/request/123", 200, "{\"job\":{\"jobId\":42}}");
+
+        HttpResponse<String> r = post(sidecarBase, "/api/request/123");
+
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(r.body()).isEqualTo("{\"job\":{\"jobId\":42}}");
+        assertThat(upstreamReceived).containsExactly("/api/request/123");
+        // It really reached the upstream as a POST, not a GET.
+        assertThat(upstreamMethods).containsExactly("POST");
+    }
+
+    @Test
+    void postUpstreamErrorIsMirrored() throws Exception {
+        // A write whose upstream rejects it (e.g. a bad match id) mirrors the status and body, just
+        // like the GET path does.
+        stubUpstream("/api/request/0", 400, "{\"error\":\"bad request\"}");
+
+        HttpResponse<String> r = post(sidecarBase, "/api/request/0");
+
+        assertThat(r.statusCode()).isEqualTo(400);
+        assertThat(r.body()).contains("bad request");
+    }
+
+    @Test
+    void postIsTokenGatedLikeGet() throws Exception {
+        // A token-gated sidecar requires the shared secret on the POST, just as it does on a GET.
+        stubUpstream("/api/players/123/refresh", 200, "ok");
+
+        try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "s3cret")) {
+            gated.start();
+            String base = "http://127.0.0.1:" + gated.port();
+
+            // No token -> 401, never reaches the upstream.
+            HttpResponse<String> missing = post(base, "/api/players/123/refresh");
+            assertThat(missing.statusCode()).isEqualTo(401);
+            assertThat(upstreamHits.get()).isEqualTo(0);
+
+            // Correct token -> forwarded.
+            HttpResponse<String> ok = http.send(
+                    HttpRequest.newBuilder(URI.create(base + "/api/players/123/refresh"))
+                            .header("X-Sidecar-Token", "s3cret")
+                            .POST(HttpRequest.BodyPublishers.noBody()).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(ok.statusCode()).isEqualTo(200);
+            assertThat(upstreamMethods).containsExactly("POST");
+        }
     }
 
     @Test

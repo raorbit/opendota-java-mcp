@@ -19,6 +19,9 @@ import java.util.logging.Logger;
  * {@code OPENDOTA_SIDECAR_PORT}, else {@value #DEFAULT_PORT} — then starts the
  * loopback HTTP server and blocks until the JVM is shut down.
  *
+ * <p>Forwarding agents can both read ({@code GET}) and queue writes ({@code POST} — parse requests /
+ * player refreshes) through the sidecar; it holds the key and owns the one rate limiter and cache.
+ *
  * <p>Run it once per machine before launching the agents:
  * <pre>{@code OPENDOTA_API_KEY=<uuid> java -jar opendota-sidecar-1.2.0.jar}</pre>
  *
