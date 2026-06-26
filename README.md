@@ -292,8 +292,8 @@ registers three tools that POST to OpenDota to queue work:
 | `refresh_player` | `POST /players/{account_id}/refresh` | Refresh a player's recent match history from Steam. |
 
 When the flag is unset these tools are not created and never appear in `tools/list`. Writes are
-rate-limited but never cached. (The shared sidecar only proxies `GET`s, so enable write tools on a
-**direct** server rather than a forwarding one.)
+rate-limited but never cached. They also work through the shared sidecar, which forwards `POST`s to
+OpenDota under its key — see [Running several agents](#running-several-agents-shared-sidecar).
 
 ### Running several agents (shared sidecar)
 
@@ -320,6 +320,10 @@ port with `opendota.sidecar-port`). If an agent starts before the sidecar, it re
 connection briefly. The sidecar has no authentication, so only run it on a host where every
 local user is trusted. See
 [`docs/mcp-registration.md`](docs/mcp-registration.md#shared-sidecar-for-multiple-agents).
+
+The sidecar forwards both reads (`GET`) and writes (`POST`): agents' [write tools](#write-tools-opt-in)
+(parse requests / player refreshes) reach OpenDota through it, rate-limited under the sidecar's shared
+key. Writes bypass the cache and go straight to OpenDota.
 
 ### Steam32 account IDs
 

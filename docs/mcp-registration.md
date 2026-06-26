@@ -184,10 +184,10 @@ owns the single rate limiter and a shared cache, and have each server forward to
    (`opendota.sidecar.port`); the sidecar also accepts the dashed `-Dopendota.sidecar-port=<port>`
    so the two cannot be silently mismatched by separator.
 
-> **Do not combine the write tools with the sidecar.** Setting
-> `opendota.write-tools-enabled=true` together with `opendota.sidecar-enabled=true`
-> **fails fast at startup** — the shared sidecar only proxies `GET`s. Run the write
-> tools on a direct (non-forwarding) server instead.
+> **Write tools through the sidecar.** The sidecar forwards `POST`s as well as `GET`s, so a
+> forwarding agent's write tools (`request_parse`, `refresh_player`) reach OpenDota under the
+> sidecar's key. Enabling `opendota.write-tools-enabled=true` on the agent together with
+> `opendota.sidecar-enabled=true` is supported.
 
 ## Running the server directly
 
@@ -219,4 +219,5 @@ The server is read-only by default. Add `-Dopendota.write-tools-enabled=true`
 (before `-jar`) to register three additional **write** tools — `request_parse`,
 `get_parse_request`, `refresh_player` — which POST to OpenDota to queue a match
 parse or refresh a player. They are absent from `tools/list` unless the flag is
-set, and (as noted above) cannot be combined with sidecar forwarding.
+set. They also work over sidecar forwarding (the sidecar forwards `POST`s); see the
+sidecar note above.

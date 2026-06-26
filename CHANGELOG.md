@@ -5,6 +5,19 @@ All notable changes to **opendota-mcp** are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Sidecar write forwarding.** The shared sidecar now forwards write requests (`POST /api/*` — parse
+  requests / player refreshes) to OpenDota under its key, alongside the existing `GET` proxying. Writes
+  bypass the cache and are rate-limited like any other call; the token gate (when set) applies to them
+  too.
+
+### Changed
+
+- The opt-in write tools now work over sidecar forwarding: enabling `opendota.write-tools-enabled=true`
+  together with `opendota.sidecar-enabled=true` is supported (previously it failed fast at startup, as
+  the sidecar was GET-only).
+
 ## [1.2.0] - 2026-06-24
 
 Container packaging for both the MCP server and the shared sidecar, published to GHCR, plus a
