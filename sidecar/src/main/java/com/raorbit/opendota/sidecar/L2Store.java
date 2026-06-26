@@ -484,6 +484,36 @@ public final class L2Store implements AutoCloseable {
     }
 
     /**
+     * Delete the row for {@code path} only if it is PINNED — used to reclaim a watched-archive row whose
+     * player is no longer watched (spec §6.5), so it stops counting against the watched budget. A no-op
+     * (returns {@code 0}) when the row is absent or not PINNED, so it can be called unconditionally on
+     * the un-watched path without disturbing a PERMANENT/TTL row at the same key. Maintains both the
+     * global and pinned sub-totals.
+     *
+     * @return the number of rows deleted (0 or 1)
+     */
+    public synchronized int deletePinned(String path) throws SQLException {
+        String sql = "DELETE FROM cache_entries WHERE path = ? AND classification = 'PINNED' "
+                + "RETURNING LENGTH(CAST(body AS BLOB))";
+        int deleted = 0;
+        long freedBytes = 0L;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, path);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    deleted++;
+                    freedBytes += rs.getLong(1);
+                }
+            }
+        }
+        currentRows.addAndGet(-deleted);
+        currentBytes.addAndGet(-freedBytes);
+        pinnedRows.addAndGet(-deleted);
+        pinnedBytes.addAndGet(-freedBytes);
+        return deleted;
+    }
+
+    /**
      * Bring the table within both the row-count and byte caps, evicting oldest-first, all under this
      * store's monitor so the check and the eviction are atomic — concurrent callers can't each read
      * the same overage and over-evict (N x the surplus). Best-effort (spec §6.4).
@@ -581,10 +611,12 @@ public final class L2Store implements AutoCloseable {
 
     /**
      * Delete every TTL row whose {@code expires_at} has passed ({@code <= now}), reclaiming dead rows
-     * before they count against the caps or outlive a still-valid PERMANENT row. PERMANENT <em>and
-     * PINNED</em> rows have {@code expires_at = NULL} and are never matched (the watched archive is
-     * permanent). A single {@code DELETE ... RETURNING} so the deleted rows and their summed bytes are
-     * the same set (mirrors {@link #patchBust()}).
+     * before they count against the caps or outlive a still-valid PERMANENT row. PERMANENT rows have
+     * {@code expires_at = NULL} and are never matched. PINNED rows are <em>explicitly excluded</em>: an
+     * unparsed PINNED match carries an {@code expires_at} as a re-fetch stamp (spec §6.5), not a death
+     * sentence — the watched archive is permanent, so its retry stamp must never delete the row. A
+     * single {@code DELETE ... RETURNING} so the deleted rows and their summed bytes are the same set
+     * (mirrors {@link #patchBust()}).
      *
      * <p>Liveness is request-driven (spec §6.4): this runs inside {@link #enforceCaps}, i.e. after a
      * store — a write-idle/read-heavy db still holds dead rows between stores, which the read predicate
@@ -594,6 +626,7 @@ public final class L2Store implements AutoCloseable {
      */
     public synchronized int evictExpired(long now) throws SQLException {
         String sql = "DELETE FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at <= ? "
+                + "AND classification != 'PINNED' "
                 + "RETURNING LENGTH(CAST(body AS BLOB))";
         int deleted = 0;
         long freedBytes = 0L;

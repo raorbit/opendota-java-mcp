@@ -181,12 +181,15 @@ public final class L2CachingGateway implements AutoCloseable {
                     && e.patchId() != null && !currentPatchId.equals(e.patchId())) {
                 return null;
             }
-            // Save-now-upgrade-later (spec §6.5): an UNPARSED PINNED match was stored to retain the data,
-            // but we must never serve an unparsed body when a parsed one may now exist. Force a re-fetch
-            // (return null) so maybeStore can upgrade it in place to the parsed body once OpenDota parses.
+            // Save-now-upgrade-later (spec §6.5): an UNPARSED PINNED match is served from L2 until its
+            // re-fetch stamp (expires_at) elapses, then force a re-fetch (return null) so maybeStore can
+            // upgrade it in place to the parsed body once OpenDota parses. This bounds the re-fetch to at
+            // most once per watchedRefetchMillis rather than on every access. A null expires_at on an
+            // unparsed pinned row (e.g. pre-retry-after data, or a 0 interval) is treated as due now.
             if (Classification.PINNED.name().equals(e.classification())
                     && MATCH_ID.matcher(stripQuery(path)).matches()
-                    && !isParsedMatch(e.body())) {
+                    && !isParsedMatch(e.body())
+                    && (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis())) {
                 return null;
             }
             return e;
@@ -213,6 +216,15 @@ public final class L2CachingGateway implements AutoCloseable {
             recordError("L2 stale read", path, ex);
         }
         return null;
+    }
+
+    /** Delete a PINNED row whose player is no longer watched (best-effort; an L2 error is a no-op). */
+    private void reclaimPinned(String path) {
+        try {
+            store.deletePinned(path);
+        } catch (SQLException ex) {
+            recordError("L2 reclaim", path, ex);
+        }
     }
 
     /**
@@ -257,19 +269,34 @@ public final class L2CachingGateway implements AutoCloseable {
                 return;
             }
             boolean isMatch = MATCH_ID.matcher(stripQuery(path)).matches();
+            boolean parsed = !isMatch || isParsedMatch(body);
             boolean watched = isMatch && watchedPattern != null && watchedPattern.matcher(body).find();
             if (watched) {
                 // A watched-player match → PINNED (the personal archive, spec §6.5). Store it even when
                 // UNPARSED (save now, upgrade later) — bypassing the isParsedMatch skip below — so the
-                // data is retained; lookup() forces a re-fetch of an unparsed PINNED row until OpenDota
-                // parses it, then maybeStore upgrades it in place. PINNED is permanent + exempt from the
-                // main caps, so expires_at and patch_id are both null.
+                // data is retained. PINNED is permanent + exempt from the main caps (patch_id null). An
+                // UNPARSED row carries a re-fetch stamp (expires_at = now + watchedRefetchMillis) so it
+                // is served from L2 between hourly re-checks rather than re-fetched on every access;
+                // lookup() forces a re-fetch once the stamp elapses, and the parsed body is stored with
+                // no expiry (it serves straight from L2 thereafter). evictExpired excludes PINNED, so the
+                // stamp never deletes the archive row.
                 storeClass = Classification.PINNED;
-                expiresAt = null;
+                long refetchMs = config.watchedRefetchMillis();
+                // Parsed (final body) or a 0 interval (always re-fetch) → no stamp; otherwise stamp the
+                // retry-after. A null stamp on an unparsed pinned row is treated as "due now" by lookup().
+                expiresAt = (parsed || refetchMs <= 0) ? null : now + refetchMs;
                 patchId = null;
             } else {
-                if (isMatch && !isParsedMatch(body)) {
-                    // Unparsed, non-watched match: do NOT store permanently — re-fetch next time (spec §5.1).
+                if (isMatch && !parsed) {
+                    // Unparsed, non-watched match. If a PINNED row exists at this key its player is no
+                    // longer watched (the body no longer matches), so reclaim it (spec §6.5) — it stops
+                    // counting against the watched budget and force-missing. Then do NOT store the
+                    // unparsed body permanently — re-fetch next time (spec §5.1). (A parsed non-watched
+                    // match instead falls through and overwrites any PINNED row as PERMANENT via put(),
+                    // which nets the class transition.)
+                    if (stalePinned(path) != null) {
+                        reclaimPinned(path);
+                    }
                     l2StoreSkippedUnparsed.incrementAndGet();
                     return;
                 }

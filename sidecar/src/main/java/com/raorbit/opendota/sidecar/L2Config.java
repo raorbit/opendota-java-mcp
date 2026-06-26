@@ -56,6 +56,8 @@ public final class L2Config {
     private static final String WATCHED_MAX_ROWS_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS";
     private static final String WATCHED_MAX_BYTES_PROP = "opendota.sidecar.l2.watchedMaxBytes";
     private static final String WATCHED_MAX_BYTES_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES";
+    private static final String WATCHED_REFETCH_PROP = "opendota.sidecar.l2.watchedRefetchMillis";
+    private static final String WATCHED_REFETCH_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS";
 
     /** Default cap: 50,000 rows (spec §6.4). */
     static final int DEFAULT_MAX_ROWS = 50_000;
@@ -63,6 +65,12 @@ public final class L2Config {
     static final long DEFAULT_MAX_BYTES = 512L * 1024 * 1024;
     /** Default patch-check cadence: 6h — the same horizon {@code ttlFor} uses for static data (spec §5.2). */
     static final long DEFAULT_PATCH_CHECK_MILLIS = Duration.ofHours(6).toMillis();
+    /**
+     * Default re-check cadence for an unparsed PINNED match (spec §6.5): served from L2 for this long
+     * before another upstream re-fetch is attempted to pick up the parsed body, so a match OpenDota has
+     * not (yet) parsed is re-fetched at most hourly rather than on every access.
+     */
+    static final long DEFAULT_WATCHED_REFETCH_MILLIS = Duration.ofHours(1).toMillis();
     /** Default db filename under {@code ${user.home}/.opendota-sidecar/} (spec §6.1). */
     private static final String DEFAULT_DB_DIR = ".opendota-sidecar";
     private static final String DEFAULT_DB_FILE = "l2-cache.db";
@@ -93,6 +101,7 @@ public final class L2Config {
     private final String patchIdOverride;
     private final int readPoolSize;
     private final Watched watched;
+    private final long watchedRefetchMillis;
 
     public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride) {
         this(dbPath, maxRows, maxBytes, patchCheckMillis, patchIdOverride, L2Store.DEFAULT_READ_POOL, Watched.NONE);
@@ -105,6 +114,12 @@ public final class L2Config {
 
     public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride,
                     int readPoolSize, Watched watched) {
+        this(dbPath, maxRows, maxBytes, patchCheckMillis, patchIdOverride, readPoolSize, watched,
+                DEFAULT_WATCHED_REFETCH_MILLIS);
+    }
+
+    public L2Config(Path dbPath, int maxRows, long maxBytes, long patchCheckMillis, String patchIdOverride,
+                    int readPoolSize, Watched watched, long watchedRefetchMillis) {
         this.dbPath = dbPath;
         this.maxRows = maxRows;
         this.maxBytes = maxBytes;
@@ -112,6 +127,9 @@ public final class L2Config {
         this.patchIdOverride = patchIdOverride;
         this.readPoolSize = readPoolSize;
         this.watched = watched == null ? Watched.NONE : watched;
+        // 0 is allowed (and used in tests) to mean "re-fetch on every access" — the pre-retry-after
+        // behaviour; negative is coerced to 0.
+        this.watchedRefetchMillis = Math.max(0L, watchedRefetchMillis);
     }
 
     /** Whether the L2 tier is enabled via {@code OPENDOTA_SIDECAR_L2=true} / {@code -Dopendota.sidecar.l2=true}. */
@@ -152,7 +170,8 @@ public final class L2Config {
                 resolveLong(PATCH_INTERVAL_PROP, PATCH_INTERVAL_ENV, DEFAULT_PATCH_CHECK_MILLIS),
                 trimToNull(resolve(PATCH_ID_PROP, PATCH_ID_ENV, null)),
                 resolveInt(READ_POOL_PROP, READ_POOL_ENV, L2Store.DEFAULT_READ_POOL),
-                watched);
+                watched,
+                resolveLong(WATCHED_REFETCH_PROP, WATCHED_REFETCH_ENV, DEFAULT_WATCHED_REFETCH_MILLIS));
     }
 
     /**
@@ -235,6 +254,14 @@ public final class L2Config {
     /** Watched-archive byte cap; {@code 0} = unlimited (never delete pinned rows for byte total). */
     public long watchedMaxBytes() {
         return watched.maxBytes();
+    }
+
+    /**
+     * How long (ms) an unparsed PINNED match is served from L2 before another upstream re-fetch is
+     * attempted to upgrade it to the parsed body. {@code 0} = re-fetch on every access.
+     */
+    public long watchedRefetchMillis() {
+        return watchedRefetchMillis;
     }
 
     private static Path resolveDbPath() {
