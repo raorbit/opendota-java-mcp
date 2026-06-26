@@ -171,7 +171,7 @@ public final class L2Config {
                 trimToNull(resolve(PATCH_ID_PROP, PATCH_ID_ENV, null)),
                 resolveInt(READ_POOL_PROP, READ_POOL_ENV, L2Store.DEFAULT_READ_POOL),
                 watched,
-                resolveLong(WATCHED_REFETCH_PROP, WATCHED_REFETCH_ENV, DEFAULT_WATCHED_REFETCH_MILLIS));
+                resolveRefetch(WATCHED_REFETCH_PROP, WATCHED_REFETCH_ENV, DEFAULT_WATCHED_REFETCH_MILLIS));
     }
 
     /**
@@ -346,6 +346,32 @@ public final class L2Config {
         } catch (NumberFormatException e) {
             LOG.warning(() -> "L2 config " + prop + "='" + raw + "' is not a number; treating as unlimited (0)");
             return 0;
+        }
+    }
+
+    /**
+     * Resolve the watched re-fetch knob, where {@code 0} is the documented "re-fetch on every access"
+     * value and so must be accepted (unlike {@link #resolveLong}, which rejects {@code <= 0} and would
+     * coerce the {@code 0} back to the 1h default). Unlike {@link #resolveCap}, the unset default is the
+     * 1h {@code fallback}, not {@code 0}: an operator who never sets the knob gets hourly re-checks, while
+     * an explicit {@code 0} opts into the old re-fetch-every-access behaviour. Unset/blank → {@code fallback};
+     * {@code 0} or a positive number → that value; a negative or non-numeric value warns and falls back.
+     */
+    static long resolveRefetch(String prop, String env, long fallback) {
+        String raw = trimToNull(resolve(prop, env, null));
+        if (raw == null) {
+            return fallback;
+        }
+        try {
+            long v = Long.parseLong(raw);
+            if (v < 0) {
+                LOG.warning(() -> "L2 config " + prop + "='" + raw + "' must be >= 0; using default " + fallback);
+                return fallback;
+            }
+            return v;
+        } catch (NumberFormatException e) {
+            LOG.warning(() -> "L2 config " + prop + "='" + raw + "' is not a number; using default " + fallback);
+            return fallback;
         }
     }
 

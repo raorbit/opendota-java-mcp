@@ -19,11 +19,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class L2ConfigTest {
 
     private static final String CAP_PROP = "opendota.sidecar.l2.watchedMaxRows";
+    private static final String REFETCH_PROP = "opendota.sidecar.l2.watchedRefetchMillis";
+    private static final String REFETCH_ENV = "OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS";
 
     @BeforeEach
     @AfterEach
     void clearProperties() {
         System.clearProperty(CAP_PROP);
+        System.clearProperty(REFETCH_PROP);
     }
 
     // ---- parseWatchedPlayers ----
@@ -101,6 +104,45 @@ class L2ConfigTest {
         assertThat(L2Config.resolveCap(CAP_PROP, "OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS")).isZero();
         System.setProperty(CAP_PROP, "lots");
         assertThat(L2Config.resolveCap(CAP_PROP, "OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS")).isZero();
+    }
+
+    // ---- watchedRefetchMillis via fromEnvironment() (0 must be reachable; unset → 1h default) ----
+
+    @Test
+    void fromEnvironmentRefetchZeroIsReachable() {
+        // The documented "re-fetch on every access" value (0) must survive fromEnvironment() — unlike a
+        // resolveLong knob, which would reject 0 and coerce it back to the 1h default.
+        System.setProperty(REFETCH_PROP, "0");
+        assertThat(L2Config.fromEnvironment().watchedRefetchMillis()).isZero();
+    }
+
+    @Test
+    void fromEnvironmentRefetchPositiveIsUsed() {
+        System.setProperty(REFETCH_PROP, "120000");
+        assertThat(L2Config.fromEnvironment().watchedRefetchMillis()).isEqualTo(120_000L);
+    }
+
+    @Test
+    void fromEnvironmentRefetchNegativeFallsBackToDefault() {
+        assumeTrue(System.getenv(REFETCH_ENV) == null);
+        System.setProperty(REFETCH_PROP, "-5");
+        assertThat(L2Config.fromEnvironment().watchedRefetchMillis())
+                .isEqualTo(L2Config.DEFAULT_WATCHED_REFETCH_MILLIS);
+    }
+
+    @Test
+    void fromEnvironmentRefetchNonNumericFallsBackToDefault() {
+        assumeTrue(System.getenv(REFETCH_ENV) == null);
+        System.setProperty(REFETCH_PROP, "soon");
+        assertThat(L2Config.fromEnvironment().watchedRefetchMillis())
+                .isEqualTo(L2Config.DEFAULT_WATCHED_REFETCH_MILLIS);
+    }
+
+    @Test
+    void fromEnvironmentRefetchUnsetIsTheOneHourDefault() {
+        assumeTrue(System.getenv(REFETCH_ENV) == null);
+        assertThat(L2Config.fromEnvironment().watchedRefetchMillis())
+                .isEqualTo(L2Config.DEFAULT_WATCHED_REFETCH_MILLIS);
     }
 
     // ---- Watched record + legacy constructors ----
