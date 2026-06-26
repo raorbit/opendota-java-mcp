@@ -279,7 +279,7 @@ variables, JVM `-D` flags, or an external `application.properties`):
 | `opendota.sidecar-enabled` | `false` | Forward every OpenDota call to a shared local sidecar instead of calling OpenDota directly — see [Running several agents](#running-several-agents-shared-sidecar). |
 | `opendota.sidecar-host` / `opendota.sidecar-port` | `127.0.0.1` / `31337` | Address of the shared sidecar (used only when `sidecar-enabled` is `true`). |
 | `opendota.write-tools-enabled` | `false` | Register the opt-in write tools — see [Write tools](#write-tools-opt-in). Off by default; the server is read-only unless you set this. |
-| `opendota.sidecar.l2.watchedPlayers` (env `OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS`) | *(empty)* | Comma-separated Steam32 `account_id`s to permanently archive every match for — see [Watched players](#watched-players-personal-match-archive). Sidecar-only; needs the L2 cache (`OPENDOTA_SIDECAR_L2=true`). Empty = off. |
+| `opendota.sidecar.l2.watchedPlayers` (env `OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS`) | *(empty)* | Comma-separated Steam32 `account_id`s whose fetched matches are permanently archived — see [Watched players](#watched-players-personal-match-archive). Sidecar-only; needs the L2 cache (`OPENDOTA_SIDECAR_L2=true`). Empty = off. |
 | `opendota.sidecar.l2.watchedMaxRows` (env `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS`) | `0` (unlimited) | Max archived matches before the oldest evict; `0`/blank/`unlimited`/`none`/`never` = never delete. Separate from the main cache cap. |
 | `opendota.sidecar.l2.watchedMaxBytes` (env `OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES`) | `0` (unlimited) | Max archived body bytes before the oldest evict; same `0`/keyword = unlimited semantics. |
 
@@ -331,8 +331,10 @@ key. Writes bypass the cache and go straight to OpenDota.
 ### Watched players (personal match archive)
 
 The sidecar's durable **L2 SQLite cache** (`OPENDOTA_SIDECAR_L2=true`) can keep a *personal archive*:
-name a set of players and the sidecar **permanently stores every match they appear in**, governed by
-its **own** retention budget that is independent of the ordinary cache cap.
+name a set of players and the sidecar **permanently archives every watched match it fetches** —
+i.e. any `/matches/{id}` opened (by you or an agent) whose body mentions a watched `account_id` —
+governed by its **own** retention budget independent of the ordinary cache cap. The archive is
+populated on access; it does not backfill a player's full match history.
 
 ```sh
 # Resolve names to Steam32 account_ids first (search_players), then start the sidecar with:
@@ -348,7 +350,10 @@ Behaviour:
   vice-versa.
 - **Save now, upgrade later.** A watched match is archived immediately even if OpenDota hasn't parsed
   the replay yet; the sidecar keeps re-fetching it on access until it parses, then stores the parsed
-  body in place. A parsed match serves straight from L2.
+  body in place. A parsed match serves straight from L2. (Two caveats for a match OpenDota never parses
+  — e.g. its replay expired: it keeps re-fetching on every access, costing a little rate-limit budget;
+  and if a re-fetch fails while it is still unparsed, the sidecar serves the retained unparsed body
+  rather than failing the request.)
 - **Its own budget.** `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` / `…_WATCHED_MAX_BYTES` cap the archive;
   the default (blank or `0`, also spellable `unlimited`/`none`/`never`) means **never delete**. Set a
   positive limit and the oldest archived matches evict first, only against this budget.

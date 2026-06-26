@@ -370,8 +370,10 @@ archive (§6.5) out of the main cap entirely.
 ### 6.5 Watched players — a personal archive with its own budget (`PINNED`)
 
 The operator can name a set of **watched** Steam32 `account_id`s and have the sidecar permanently
-archive **every match those players appear in**, governed by its **own** retention budget that is
-independent of the ordinary cache cap (§6.4).
+archive **every watched match it fetches** — any `/matches/{id}` request whose body mentions a watched
+`account_id` — governed by its **own** retention budget that is independent of the ordinary cache cap
+(§6.4). The archive is **access-driven**: a match enters it when something fetches that id (it is not a
+backfill of a player's history, and `/players/{id}` history endpoints are TTL, never PINNED).
 
 **Configuration.** A comma-separated id list plus the archive's own row and byte caps:
 
@@ -400,6 +402,21 @@ PINNED decision happens in `maybeStore`, which has the body and can scan it for 
 upgrades it in place to the parsed body once OpenDota parses the replay. A parsed PINNED row hits
 normally. Pre-existing PERMANENT rows for a newly-watched player stay PERMANENT/evictable until
 re-fetched, at which point they upgrade to PINNED.
+
+Two consequences of the unconditional force-miss are worth calling out:
+
+- **Never-parses re-fetch cost.** A match OpenDota never parses (e.g. its replay expired before anyone
+  requested a parse) stays unparsed forever, so every access re-fetches it upstream and re-stores it —
+  a small, ongoing rate-limit + write cost for that one path. Bounding this (an age horizon or a
+  retry-after stamp) is a possible future refinement; today it is unbounded by design.
+- **Outage fallback.** Because the unparsed PINNED body is the only stored row that reaches the miss
+  path, `get()` catches a failed re-fetch and serves that retained unparsed body instead of failing the
+  request — the archive's data survives an upstream outage. (An ordinary miss with no stored row still
+  propagates its error.)
+
+A row stays PINNED even after its player is un-watched (the new pattern simply stops matching), so an
+un-watched, never-parsed match keeps force-missing and counts against the watched budget until it
+parses; this is a known minor accounting quirk, not a correctness issue.
 
 **Two-tier eviction** (the key change). `enforceCaps(maxRows, maxBytes, watchedMaxRows,
 watchedMaxBytes, now)`:

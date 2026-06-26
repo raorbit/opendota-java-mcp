@@ -8,8 +8,8 @@ All notable changes to **opendota-mcp** are documented here. The format follows
 ### Added
 
 - **Watched-player match archive (sidecar L2).** The durable L2 cache can permanently archive every
-  match a configured set of players appears in, governed by its own retention budget separate from the
-  ordinary cache cap. Set `OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS` (comma-separated Steam32 `account_id`s)
+  watched match it fetches — any `/matches/{id}` whose body mentions a configured player (access-driven,
+  not a history backfill) — governed by its own retention budget separate from the ordinary cache cap. Set `OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS` (comma-separated Steam32 `account_id`s)
   with optional `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` / `…_WATCHED_MAX_BYTES` caps (default unlimited =
   never delete). Watched matches are stored as a new `PINNED` class — exempt from the main cap, saved
   immediately even when unparsed, and re-fetched until parsed (then upgraded in place). New `/stats`
