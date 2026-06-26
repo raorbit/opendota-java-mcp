@@ -15,8 +15,11 @@ All notable changes to **opendota-mcp** are documented here. The format follows
   immediately even when unparsed, then served from L2 and re-checked upstream for the parsed body at
   most once per hour (tunable via `OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS`), upgrading in place once
   it parses; a failed re-check serves the retained body rather than erroring. Un-watching a player
-  reclaims their archived unparsed matches on next access. New `/stats` counters: `l2WatchedStore`,
-  `pinnedRows`, `pinnedBytes`.
+  reclaims their archived unparsed matches on next access. The sidecar also **auto-requests parses** of
+  watched players' unparsed matches (on by default, `OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE`) — both
+  access-driven and via a background poll (`…_WATCHED_PARSE_POLL_MILLIS`, default 1h) over each player's
+  recent matches — so they actually become parsed (a `GET` alone never triggers a parse). New `/stats`
+  counters: `l2WatchedStore`, `pinnedRows`, `pinnedBytes`, `parseRequested`, `parseErrors`.
 - **Sidecar write forwarding.** The shared sidecar now forwards write requests (`POST /api/*` — parse
   requests / player refreshes) to OpenDota under its key, alongside the existing `GET` proxying. Writes
   bypass the cache and are rate-limited like any other call; the token gate (when set) applies to them
