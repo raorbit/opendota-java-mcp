@@ -328,27 +328,44 @@ public final class L2Store implements AutoCloseable {
         }
     }
 
-    /** Store (or overwrite) a row with {@code INSERT OR REPLACE} on the {@code path} primary key. */
+    /**
+     * Store (or overwrite) a row with {@code INSERT OR REPLACE} on the {@code path} primary key.
+     *
+     * <p>On a PINNED→PINNED overwrite (an interval re-store of an already-archived watched match) the
+     * row's <em>original</em> {@code stored_at} is preserved rather than overwritten with the passed
+     * {@code storedAt}: the archive time reflects when the match first entered the archive, so a
+     * re-fetch to upgrade an unparsed body (or refresh its retry stamp) doesn't reset its age and
+     * {@link #evictOldestPinned} ({@code ORDER BY stored_at ASC}) still evicts truly-oldest matches first.
+     * Every other transition (a fresh insert, or any non-PINNED→PINNED / PINNED→non-PINNED crossing)
+     * uses the passed {@code storedAt} unchanged.
+     */
     public synchronized void put(String path, String body, Classification classification, long storedAt,
                                  Long expiresAt, int schemaVersion, String patchId) throws SQLException {
         // INSERT OR REPLACE may overwrite an existing row, so net out the old body's bytes (and skip
         // the row increment) to keep the running totals exact across overwrites. Also read the old
         // classification so the pinned sub-totals net out correctly when a row crosses the PINNED
-        // boundary (e.g. a PERMANENT match that, on re-store, upgrades to PINNED).
+        // boundary (e.g. a PERMANENT match that, on re-store, upgrades to PINNED), and the old
+        // stored_at so a PINNED→PINNED overwrite can keep the original archive time.
         long oldBytes = 0L;
+        long oldStoredAt = 0L;
         boolean existed = false;
         boolean wasPinned = false;
         try (PreparedStatement sel = conn.prepareStatement(
-                "SELECT LENGTH(CAST(body AS BLOB)), classification FROM cache_entries WHERE path = ?")) {
+                "SELECT LENGTH(CAST(body AS BLOB)), classification, stored_at FROM cache_entries WHERE path = ?")) {
             sel.setString(1, path);
             try (ResultSet rs = sel.executeQuery()) {
                 if (rs.next()) {
                     existed = true;
                     oldBytes = rs.getLong(1);
                     wasPinned = Classification.PINNED.name().equals(rs.getString(2));
+                    oldStoredAt = rs.getLong(3);
                 }
             }
         }
+        // Preserve the original archive time on a PINNED→PINNED overwrite so an interval re-store of an
+        // archived match keeps its true age; every other transition uses the passed storedAt.
+        boolean isPinned = classification == Classification.PINNED;
+        long effectiveStoredAt = (existed && wasPinned && isPinned) ? oldStoredAt : storedAt;
         String sql = "INSERT OR REPLACE INTO cache_entries"
                 + "(path, body, classification, stored_at, expires_at, schema_version, patch_id) "
                 + "VALUES (?, ?, ?, ?, ?, ?, ?)";
@@ -356,7 +373,7 @@ public final class L2Store implements AutoCloseable {
             ps.setString(1, path);
             ps.setString(2, body);
             ps.setString(3, classification.name());
-            ps.setLong(4, storedAt);
+            ps.setLong(4, effectiveStoredAt);
             if (expiresAt == null) {
                 ps.setNull(5, java.sql.Types.INTEGER);
             } else {
@@ -377,7 +394,6 @@ public final class L2Store implements AutoCloseable {
         currentBytes.addAndGet(newBytes - oldBytes);
         // Maintain the pinned sub-totals by the net change across the PINNED boundary: +1 row / +newBytes
         // if the new row is pinned, -1 row / -oldBytes if the replaced row was pinned (each conditional).
-        boolean isPinned = classification == Classification.PINNED;
         if (isPinned) {
             if (!wasPinned) {
                 pinnedRows.incrementAndGet();

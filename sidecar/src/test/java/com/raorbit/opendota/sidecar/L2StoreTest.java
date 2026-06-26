@@ -475,6 +475,49 @@ class L2StoreTest {
         }
     }
 
+    // ---- PINNED→PINNED overwrite preserves the original stored_at (archive age) ----
+
+    @Test
+    void pinnedToPinnedOverwritePreservesOriginalStoredAt(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // Archive a PINNED row at 100, then re-store the same path PINNED with a much later stored_at
+            // (an interval re-fetch to upgrade the body) — the original archive time (100) is kept.
+            store.put("/matches/777", "unparsed", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/777", "parsed", Classification.PINNED, 999, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.get("/matches/777").storedAt()).isEqualTo(100L);
+            assertThat(store.get("/matches/777").body()).isEqualTo("parsed");
+        }
+    }
+
+    @Test
+    void pinnedToPinnedReStoreKeepsEvictionByOriginalAge(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // /a is older (100), /b is newer (200). An interval re-fetch of /a re-stores it PINNED with a
+            // future stored_at (999); evictOldestPinned(1) must still evict /a (oldest by ORIGINAL time).
+            store.put("/a", "x", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/b", "x", Classification.PINNED, 200, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/a", "x2", Classification.PINNED, 999, null, L2Store.SCHEMA_VERSION, null);
+
+            assertThat(store.evictOldestPinned(1)).isEqualTo(1);
+            assertThat(store.get("/a")).as("oldest by original archive time is evicted").isNull();
+            assertThat(store.get("/b")).isNotNull();
+        }
+    }
+
+    @Test
+    void permanentToPinnedStoreUsesPassedStoredAt(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // A PERMANENT row upgrading to PINNED is NOT a PINNED→PINNED overwrite, so the passed
+            // stored_at (200) is used unchanged — only an already-archived row keeps its original time.
+            store.put("/matches/777", "perm", Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/777", "pin", Classification.PINNED, 200, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.get("/matches/777").storedAt()).isEqualTo(200L);
+        }
+    }
+
     // ---- read-connection pool (spec §7.1) ----
 
     @Test
