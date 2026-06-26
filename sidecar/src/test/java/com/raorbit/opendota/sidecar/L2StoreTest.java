@@ -211,6 +211,192 @@ class L2StoreTest {
         }
     }
 
+    // ---- PINNED watched-archive: eviction exemption + separate budget + counters ----
+
+    @Test
+    void evictOldestSkipsPinnedRowsEvenWhenTheyAreOldest(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // The pinned rows are the OLDEST by stored_at, so a class-agnostic evictOldest would take them
+            // first — the WHERE classification != 'PINNED' filter must skip them entirely.
+            store.put("/matches/1", "x", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "x", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/a", "x", Classification.PERMANENT, 200, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/b", "x", Classification.TTL, 210, 1L << 40, L2Store.SCHEMA_VERSION, null);
+
+            // Ask to evict more than there are non-pinned rows: only the two non-pinned go.
+            assertThat(store.evictOldest(10)).isEqualTo(2);
+            assertThat(store.get("/a")).isNull();
+            assertThat(store.get("/b")).isNull();
+            assertThat(store.get("/matches/1")).as("oldest pinned row is never main-cap evicted").isNotNull();
+            assertThat(store.get("/matches/2")).isNotNull();
+            assertThat(store.pinnedRowCount()).isEqualTo(2);
+            assertThat(store.rowCount()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void pinnedTotalsTrackAcrossPutOverwriteAcrossTheClassBoundary(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // PERMANENT -> not counted as pinned.
+            store.put("/matches/1", "aaaa", Classification.PERMANENT, 100, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.pinnedRowCount()).isZero();
+            assertThat(store.pinnedBodyBytes()).isZero();
+
+            // PERMANENT -> PINNED: +1 pinned row, +newBytes pinned bytes (old row was not pinned).
+            store.put("/matches/1", "bbbbbb", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+            assertThat(store.pinnedBodyBytes()).isEqualTo(6);
+            assertThat(store.rowCount()).isEqualTo(1);
+
+            // PINNED -> PINNED: row count unchanged, pinned bytes net the delta exactly.
+            store.put("/matches/1", "cc", Classification.PINNED, 120, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+            assertThat(store.pinnedBodyBytes()).isEqualTo(2);
+
+            // PINNED -> PERMANENT: -1 pinned row, pinned bytes back to zero; the row itself survives.
+            store.put("/matches/1", "dddd", Classification.PERMANENT, 130, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.pinnedRowCount()).isZero();
+            assertThat(store.pinnedBodyBytes()).isZero();
+            assertThat(store.rowCount()).isEqualTo(1);
+            assertThat(store.totalBodyBytes()).isEqualTo(4);
+        }
+    }
+
+    @Test
+    void evictOldestPinnedRemovesOldestPinnedAndDecrementsBothTotals(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/matches/1", "aaa", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "bbb", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/a", "cccc", Classification.PERMANENT, 120, null, L2Store.SCHEMA_VERSION, null);
+
+            assertThat(store.evictOldestPinned(1)).isEqualTo(1);
+            assertThat(store.get("/matches/1")).as("oldest pinned removed").isNull();
+            assertThat(store.get("/matches/2")).isNotNull();
+            assertThat(store.get("/a")).as("non-pinned untouched by evictOldestPinned").isNotNull();
+            // Both the global and pinned sub-totals drop by exactly the deleted row.
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+            assertThat(store.pinnedBodyBytes()).isEqualTo(3);
+            assertThat(store.rowCount()).isEqualTo(2);
+            assertThat(store.totalBodyBytes()).isEqualTo(3 + 4);
+        }
+    }
+
+    @Test
+    void enforceCapsMainRowCapCountsNonPinnedOnly(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // Three pinned (older) + three permanent (newer). With maxRows=1 the cap is on NON-pinned
+            // data only, so two oldest PERMANENT go and ALL pinned survive despite total rows >> 1.
+            store.put("/matches/1", "x", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "x", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/3", "x", Classification.PINNED, 120, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/a", "x", Classification.PERMANENT, 200, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/b", "x", Classification.PERMANENT, 210, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/c", "x", Classification.PERMANENT, 220, null, L2Store.SCHEMA_VERSION, null);
+
+            int evicted = store.enforceCaps(1, 1L << 40, 0, 0, 1_000_000L);
+            assertThat(evicted).isEqualTo(2);
+            assertThat(store.pinnedRowCount()).isEqualTo(3);
+            assertThat(store.get("/a")).isNull();
+            assertThat(store.get("/b")).isNull();
+            assertThat(store.get("/c")).as("newest non-pinned survives the non-pinned row cap of 1").isNotNull();
+            assertThat(store.get("/matches/1")).isNotNull();
+            assertThat(store.rowCount()).isEqualTo(4);
+        }
+    }
+
+    @Test
+    void enforceCapsWatchedRowCapEvictsOldestPinnedAndTerminates(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/matches/1", "x", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "x", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/3", "x", Classification.PINNED, 120, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/4", "x", Classification.PINNED, 130, null, L2Store.SCHEMA_VERSION, null);
+
+            // watchedMaxRows=2: the two oldest pinned go, the two newest stay; the loop terminates.
+            int evicted = store.enforceCaps(1L << 40, 1L << 40, 2, 0, 1_000_000L);
+            assertThat(evicted).isEqualTo(2);
+            assertThat(store.pinnedRowCount()).isEqualTo(2);
+            assertThat(store.get("/matches/1")).isNull();
+            assertThat(store.get("/matches/2")).isNull();
+            assertThat(store.get("/matches/3")).isNotNull();
+            assertThat(store.get("/matches/4")).isNotNull();
+        }
+    }
+
+    @Test
+    void enforceCapsWatchedByteCapEvictsOldestPinnedUntilUnderBudget(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // Three 4-byte pinned bodies = 12 pinned bytes; a 8-byte budget evicts the single oldest (→8).
+            store.put("/matches/1", "aaaa", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "bbbb", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/3", "cccc", Classification.PINNED, 120, null, L2Store.SCHEMA_VERSION, null);
+
+            int evicted = store.enforceCaps(1L << 40, 1L << 40, 0, 8, 1_000_000L);
+            assertThat(evicted).isEqualTo(1);
+            assertThat(store.pinnedBodyBytes()).isEqualTo(8);
+            assertThat(store.pinnedRowCount()).isEqualTo(2);
+            assertThat(store.get("/matches/1")).as("oldest pinned evicted to fit the byte budget").isNull();
+            assertThat(store.get("/matches/3")).isNotNull();
+        }
+    }
+
+    @Test
+    void enforceCapsWithUnlimitedWatchedBudgetNeverEvictsPinned(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/matches/1", "aaaa", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/2", "bbbb", Classification.PINNED, 110, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/matches/3", "cccc", Classification.PINNED, 120, null, L2Store.SCHEMA_VERSION, null);
+
+            // Tiny main caps but 0/0 watched caps (= unlimited): the main caps see zero non-pinned data,
+            // and the watched archive is never touched.
+            assertThat(store.enforceCaps(1, 1, 0, 0, 1_000_000L)).isZero();
+            assertThat(store.pinnedRowCount()).isEqualTo(3);
+            assertThat(store.rowCount()).isEqualTo(3);
+        }
+    }
+
+    @Test
+    void evictExpiredAndPatchBustLeavePinnedRows(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // PINNED has expires_at = NULL (permanent) so evictExpired never matches it, and its
+            // classification != 'PERMANENT' so patchBust never matches it either.
+            store.put("/matches/1", "x", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/players/5", "x", Classification.TTL, 90, 200L, L2Store.SCHEMA_VERSION, null);
+            store.put("/heroes", "[]", Classification.PERMANENT, 80, null, L2Store.SCHEMA_VERSION, "A");
+
+            assertThat(store.evictExpired(1000)).as("only the dead TTL row is reclaimed").isEqualTo(1);
+            assertThat(store.patchBust()).as("only the patch-scoped static row is busted").isEqualTo(1);
+            assertThat(store.get("/matches/1")).as("the pinned archive survives both").isNotNull();
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void pinnedTotalsReseedAcrossReopen(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/matches/1", "aaaa", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/a", "bbbbbb", Classification.PERMANENT, 110, null, L2Store.SCHEMA_VERSION, null);
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+            assertThat(store.pinnedBodyBytes()).isEqualTo(4);
+        }
+        // initCounters must re-seed the pinned sub-totals (COUNT/SUM WHERE classification='PINNED'), not
+        // just the global totals, so the watched caps still work after a restart.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+            assertThat(store.pinnedBodyBytes()).isEqualTo(4);
+            assertThat(store.rowCount()).isEqualTo(2);
+        }
+    }
+
     // ---- read-connection pool (spec §7.1) ----
 
     @Test
