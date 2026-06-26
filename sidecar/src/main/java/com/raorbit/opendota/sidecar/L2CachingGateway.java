@@ -138,7 +138,22 @@ public final class L2CachingGateway implements AutoCloseable {
 
         // Miss: delegate to the client (L1 / single-flight / rate limiting happen here).
         l2Miss.incrementAndGet();
-        String body = client.getJson(path);
+        String body;
+        try {
+            body = client.getJson(path);
+        } catch (OpenDotaException ex) {
+            // Save-now-upgrade-later resilience (spec §6.5): the only miss that can hold a stored body
+            // here is the forced re-fetch of an UNPARSED PINNED match (lookup() returns null for it to
+            // attempt an upgrade). If that re-fetch fails (e.g. an upstream outage), serve the retained
+            // unparsed body — the watched archive exists precisely so the data survives an outage —
+            // rather than failing the request. Any other miss (no stored row) re-throws unchanged.
+            L2Store.Entry stale = stalePinned(path);
+            if (stale != null) {
+                l2Hit.incrementAndGet();
+                return stale.body();
+            }
+            throw ex;
+        }
 
         // Conditional store: PERMANENT parse-gates matches; TTL stamps expires_at.
         maybeStore(path, body, c, patchScoped, currentPatchId);
@@ -179,6 +194,25 @@ public final class L2CachingGateway implements AutoCloseable {
             recordError("L2 read", path, ex);
             return null;
         }
+    }
+
+    /**
+     * The stored PINNED (watched-archive) row for {@code path} regardless of parse state, used ONLY as
+     * the outage fallback in {@link #get} when a forced re-fetch of an unparsed pinned match fails.
+     * {@code null} if there is no current-schema PINNED row (so an ordinary miss still propagates its
+     * error) or the read itself fails.
+     */
+    private L2Store.Entry stalePinned(String path) {
+        try {
+            L2Store.Entry e = store.get(path);
+            if (e != null && e.schemaVersion() == L2Store.SCHEMA_VERSION
+                    && Classification.PINNED.name().equals(e.classification())) {
+                return e;
+            }
+        } catch (SQLException ex) {
+            recordError("L2 stale read", path, ex);
+        }
+        return null;
     }
 
     /**
@@ -512,8 +546,10 @@ public final class L2CachingGateway implements AutoCloseable {
 
     /**
      * Immutable snapshot of the L2 counters for a {@code /stats} endpoint (spec §8). {@code l2WatchedStore}
-     * counts watched-player matches stored PINNED; {@code pinnedRows}/{@code pinnedBytes} are the store's
-     * current watched-archive totals (for observability of the archive's size against its budget).
+     * counts PINNED <em>store operations</em>, not distinct matches — an unparsed watched match is re-stored
+     * on each access until it parses (see the upgrade path in {@link #maybeStore}), so this can exceed the
+     * number of archived matches. {@code pinnedRows}/{@code pinnedBytes} are the store's current watched-
+     * archive totals (the durable, deduplicated size of the archive against its budget).
      */
     public record L2Stats(long l2Hit, long l2Miss, long l2Store, long l2WatchedStore,
                           long l2StoreSkippedUnparsed, long l2PatchBust, long l2Error, long noStore,
