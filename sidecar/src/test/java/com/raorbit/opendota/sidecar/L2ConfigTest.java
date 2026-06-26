@@ -152,4 +152,20 @@ class L2ConfigTest {
         assertThat(cfg.watchedMaxRows()).isEqualTo(3L);
         assertThat(cfg.watchedMaxBytes()).isEqualTo(4096L);
     }
+
+    @Test
+    void watchedRefetchMillisDefaultsAndIsSettableAndNonNegative() {
+        Path db = Path.of("ignored.db");
+        // The 7-arg constructor defaults the re-fetch cadence to the built-in default.
+        L2Config def = new L2Config(db, 50_000, 512L * 1024 * 1024, 1000, null, 4, L2Config.Watched.NONE);
+        assertThat(def.watchedRefetchMillis()).isEqualTo(L2Config.DEFAULT_WATCHED_REFETCH_MILLIS);
+
+        // The 8-arg constructor takes an explicit value; 0 (re-fetch every access) is allowed.
+        L2Config zero = new L2Config(db, 50_000, 512L * 1024 * 1024, 1000, null, 4, L2Config.Watched.NONE, 0L);
+        assertThat(zero.watchedRefetchMillis()).isZero();
+
+        // A negative value is coerced to 0 rather than rejected.
+        L2Config neg = new L2Config(db, 50_000, 512L * 1024 * 1024, 1000, null, 4, L2Config.Watched.NONE, -7L);
+        assertThat(neg.watchedRefetchMillis()).isZero();
+    }
 }

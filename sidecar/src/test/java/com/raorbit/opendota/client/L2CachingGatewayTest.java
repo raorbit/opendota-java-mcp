@@ -134,8 +134,15 @@ class L2CachingGatewayTest {
     }
 
     private static L2Config config(Path db, L2Config.Watched watched) {
+        // watchedRefetchMillis = 0 → re-fetch an unparsed PINNED row on every access (the simplest,
+        // deterministic behaviour for most watched tests); the backoff is exercised separately below.
+        return config(db, watched, 0L);
+    }
+
+    private static L2Config config(Path db, L2Config.Watched watched, long watchedRefetchMillis) {
         // Read-pool size 4 mirrors L2Store.DEFAULT_READ_POOL (package-private, not visible here).
-        return new L2Config(db, 50_000, 512L * 1024 * 1024, Duration.ofHours(6).toMillis(), null, 4, watched);
+        return new L2Config(db, 50_000, 512L * 1024 * 1024, Duration.ofHours(6).toMillis(), null, 4, watched,
+                watchedRefetchMillis);
     }
 
     private static long countRows(Path db) throws SQLException {
@@ -727,6 +734,62 @@ class L2CachingGatewayTest {
 
             // A non-archived path with no stored row still propagates the upstream error.
             assertThatThrownBy(() -> gw.get("/matches/999")).isInstanceOf(OpenDotaException.class);
+        }
+    }
+
+    // ---- W2c: a positive re-fetch interval serves an unparsed pinned match from L2 between re-checks ----
+    @Test
+    void unparsedPinnedBacksOffBetweenReFetchesThenUpgradesWhenDue(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        long interval = Duration.ofHours(1).toMillis();
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID), interval))) {
+            // 1st get archives the unparsed body with a FUTURE re-fetch stamp.
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(client.calls.get()).isEqualTo(1);
+            L2Store.Entry stamped = store.get("/matches/777");
+            assertThat(stamped.expiresAt()).as("an unparsed pinned row carries a re-fetch stamp").isNotNull();
+
+            // 2nd get is within the interval → served straight from L2, NO upstream re-fetch (the churn fix).
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(client.calls.get()).as("served from L2 within the re-fetch interval").isEqualTo(1);
+            assertThat(gw.stats().l2Hit()).isEqualTo(1);
+
+            // Simulate the interval elapsing by expiring the stamp; the next get re-fetches and, now that
+            // OpenDota has parsed the replay, upgrades the row in place.
+            store.put("/matches/777", WATCHED_MATCH_UNPARSED, com.raorbit.opendota.sidecar.Classification.PINNED,
+                    stamped.storedAt(), 1L, L2Store.SCHEMA_VERSION, null);
+            client.bodies.put("/matches/777", WATCHED_MATCH_PARSED);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(client.calls.get()).as("re-fetched once the stamp elapsed").isEqualTo(2);
+            assertThat(store.get("/matches/777").body()).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(store.get("/matches/777").expiresAt()).as("parsed pinned has no stamp").isNull();
+        }
+    }
+
+    // ---- W2d: an unparsed pinned row whose player was un-watched is reclaimed on the next re-fetch ----
+    @Test
+    void unwatchedUnparsedPinnedRowIsReclaimed(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        // First run: the player IS watched, so the unparsed match is archived PINNED.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID)))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(store.get("/matches/777").classification()).isEqualTo("PINNED");
+            assertThat(gw.stats().pinnedRows()).isEqualTo(1);
+        }
+        // Second run over the SAME db with NO watched players (the operator un-watched the player). The
+        // next access force-misses the orphan, re-fetches (still unparsed), sees it's no longer watched,
+        // and reclaims it so it stops counting against the watched budget.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, L2Config.Watched.NONE))) {
+            assertThat(store.pinnedRowCount()).as("orphan is still present after the restart").isEqualTo(1);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(store.get("/matches/777")).as("orphan reclaimed (deleted)").isNull();
+            assertThat(store.pinnedRowCount()).isZero();
+            assertThat(store.pinnedBodyBytes()).isZero();
         }
     }
 

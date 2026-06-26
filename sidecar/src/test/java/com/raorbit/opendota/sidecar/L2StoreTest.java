@@ -420,6 +420,44 @@ class L2StoreTest {
     }
 
     @Test
+    void evictExpiredLeavesAPinnedRowEvenWhenItsStampIsPast(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            // An unparsed PINNED match carries an expires_at as a re-fetch stamp (spec §6.5); evictExpired
+            // must NOT treat that as a death sentence — the watched archive is permanent.
+            store.put("/matches/1", "x", Classification.PINNED, 100, 200L, L2Store.SCHEMA_VERSION, null);
+            store.put("/players/5", "y", Classification.TTL, 90, 200L, L2Store.SCHEMA_VERSION, null);
+
+            assertThat(store.evictExpired(1000)).as("only the dead TTL row is reclaimed").isEqualTo(1);
+            assertThat(store.get("/matches/1")).as("pinned row survives its past stamp").isNotNull();
+            assertThat(store.pinnedRowCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void deletePinnedRemovesOnlyPinnedRowsAndMaintainsCounters(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/matches/1", "aaaa", Classification.PINNED, 100, null, L2Store.SCHEMA_VERSION, null);
+            store.put("/a", "bb", Classification.PERMANENT, 110, null, L2Store.SCHEMA_VERSION, null);
+
+            // A non-PINNED key is left alone (no-op), so a PERMANENT/TTL row at the same key is safe.
+            assertThat(store.deletePinned("/a")).isZero();
+            assertThat(store.get("/a")).isNotNull();
+            // A missing key is a no-op too.
+            assertThat(store.deletePinned("/missing")).isZero();
+
+            // The PINNED key is removed and both global and pinned totals drop by exactly that row.
+            assertThat(store.deletePinned("/matches/1")).isEqualTo(1);
+            assertThat(store.get("/matches/1")).isNull();
+            assertThat(store.pinnedRowCount()).isZero();
+            assertThat(store.pinnedBodyBytes()).isZero();
+            assertThat(store.rowCount()).isEqualTo(1);
+            assertThat(store.totalBodyBytes()).isEqualTo(2);   // only "/a" -> "bb" remains
+        }
+    }
+
+    @Test
     void pinnedTotalsReseedAcrossReopen(@TempDir Path tmp) throws Exception {
         Path db = tmp.resolve("l2.db");
         try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
