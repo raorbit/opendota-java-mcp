@@ -279,6 +279,9 @@ variables, JVM `-D` flags, or an external `application.properties`):
 | `opendota.sidecar-enabled` | `false` | Forward every OpenDota call to a shared local sidecar instead of calling OpenDota directly — see [Running several agents](#running-several-agents-shared-sidecar). |
 | `opendota.sidecar-host` / `opendota.sidecar-port` | `127.0.0.1` / `31337` | Address of the shared sidecar (used only when `sidecar-enabled` is `true`). |
 | `opendota.write-tools-enabled` | `false` | Register the opt-in write tools — see [Write tools](#write-tools-opt-in). Off by default; the server is read-only unless you set this. |
+| `opendota.sidecar.l2.watchedPlayers` (env `OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS`) | *(empty)* | Comma-separated Steam32 `account_id`s whose fetched matches are permanently archived — see [Watched players](#watched-players-personal-match-archive). Sidecar-only; needs the L2 cache (`OPENDOTA_SIDECAR_L2=true`). Empty = off. |
+| `opendota.sidecar.l2.watchedMaxRows` (env `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS`) | `0` (unlimited) | Max archived matches before the oldest evict; `0`/blank/`unlimited`/`none`/`never` = never delete. Separate from the main cache cap. |
+| `opendota.sidecar.l2.watchedMaxBytes` (env `OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES`) | `0` (unlimited) | Max archived body bytes before the oldest evict; same `0`/keyword = unlimited semantics. |
 
 ### Write tools (opt-in)
 
@@ -324,6 +327,45 @@ local user is trusted. See
 The sidecar forwards both reads (`GET`) and writes (`POST`): agents' [write tools](#write-tools-opt-in)
 (parse requests / player refreshes) reach OpenDota through it, rate-limited under the sidecar's shared
 key. Writes bypass the cache and go straight to OpenDota.
+
+### Watched players (personal match archive)
+
+The sidecar's durable **L2 SQLite cache** (`OPENDOTA_SIDECAR_L2=true`) can keep a *personal archive*:
+name a set of players and the sidecar **permanently archives every watched match it fetches** —
+i.e. any `/matches/{id}` opened (by you or an agent) whose body mentions a watched `account_id` —
+governed by its **own** retention budget independent of the ordinary cache cap. The archive is
+populated on access; it does not backfill a player's full match history.
+
+```sh
+# Resolve names to Steam32 account_ids first (search_players), then start the sidecar with:
+OPENDOTA_SIDECAR_L2=true \
+OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS=12345,67890 \
+java -jar sidecar/target/opendota-sidecar-1.2.0.jar
+```
+
+Behaviour:
+
+- A match whose body mentions a watched `account_id` is stored as a **PINNED** row: permanent, and
+  **exempt from the main cache cap** — a growing archive never evicts your ordinary cached data, and
+  vice-versa.
+- **Save now, upgrade later.** A watched match is archived immediately even if OpenDota hasn't parsed
+  the replay yet. The sidecar serves it from L2 and re-checks upstream for the parsed body **at most
+  once per hour** (tunable via `OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS`), upgrading the stored row
+  in place once it parses — so a match OpenDota never parses costs at most one re-fetch per hour, not
+  one per access. A parsed match serves straight from L2; and if a re-check fails while the match is
+  still unparsed, the retained body is served rather than failing the request.
+- **Un-watch reclaims.** Removing a player from the watch list lets the sidecar drop their archived
+  *unparsed* matches (on the next access) so they stop counting against the watched budget. Already-parsed
+  archived matches stay pinned (they serve correct, immutable data and are never re-fetched), so they keep
+  counting against the budget until manual cleanup or a schema rebuild.
+- **Its own budget.** `OPENDOTA_SIDECAR_L2_WATCHED_MAX_ROWS` / `…_WATCHED_MAX_BYTES` cap the archive;
+  the default (blank or `0`, also spellable `unlimited`/`none`/`never`) means **never delete**. Set a
+  positive limit and the oldest archived matches evict first, only against this budget.
+
+Players are identified by **Steam32** `account_id` (names are ambiguous); resolve a name with
+`search_players` first. The archive lives only in the sidecar's L2 tier and is inert unless the L2
+cache is enabled. The counters `l2WatchedStore`, `pinnedRows`, and `pinnedBytes` on `GET /stats`
+report the archive's activity and current size.
 
 ### Steam32 account IDs
 

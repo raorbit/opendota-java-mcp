@@ -20,6 +20,17 @@ public enum Classification {
      * {@code expires_at} predicate treats an elapsed row as a miss.
      */
     TTL,
+    /**
+     * A watched-player match row — a store-time refinement of {@link #PERMANENT} for a
+     * {@code /matches/{id}} body that mentions a configured watched {@code account_id}. Permanent
+     * ({@code expires_at = NULL}, {@code patch_id = NULL}), but unlike PERMANENT it is <em>exempt
+     * from the main row/byte caps</em> and governed instead by the separate watched budget
+     * ({@link L2Config.Watched}); see {@code docs/l2-cache-design.md} §6.5. It is also stored even
+     * when unparsed (save now, upgrade later — {@link L2CachingGateway#lookup} forces a re-fetch of an
+     * unparsed PINNED row so it upgrades in place once OpenDota parses it). Written only by the
+     * watched-player upgrade in {@link L2CachingGateway#maybeStore}.
+     */
+    PINNED,
     /** Never read from or written to L2 — pure passthrough to the client. */
     NO_STORE
 }

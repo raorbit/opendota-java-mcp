@@ -346,6 +346,44 @@ class SidecarHttpServerTest {
     }
 
     @Test
+    void statsExposesL2WatchedArchiveFieldsWhenL2Enabled(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp)
+            throws Exception {
+        // A parsed match mentioning the watched account_id, so fetching it pins one archive row.
+        String watchedMatch = "{\"match_id\":777,\"version\":21,\"od_data\":{\"has_parsed\":true},"
+                + "\"objectives\":[{\"type\":\"tower\"}],\"players\":[{\"account_id\":12345}]}";
+        stubUpstream("/api/matches/777", 200, watchedMatch);
+
+        com.raorbit.opendota.sidecar.L2Config cfg = new com.raorbit.opendota.sidecar.L2Config(
+                tmp.resolve("l2.db"), 50_000, 512L * 1024 * 1024, java.time.Duration.ofHours(6).toMillis(),
+                null, 4, new com.raorbit.opendota.sidecar.L2Config.Watched(java.util.Set.of(12345L), 0, 0));
+        com.raorbit.opendota.sidecar.L2Store store = new com.raorbit.opendota.sidecar.L2Store(
+                cfg.dbPath(), com.raorbit.opendota.sidecar.L2Store.SCHEMA_VERSION, cfg.readPoolSize());
+        OpenDotaClient client = new OpenDotaClient(null, upstreamBase);
+        com.raorbit.opendota.sidecar.L2CachingGateway gw =
+                new com.raorbit.opendota.sidecar.L2CachingGateway(client, store, cfg);
+
+        try (SidecarHttpServer s = new SidecarHttpServer("127.0.0.1", 0, client, gw, null)) {
+            s.start();
+            String base = "http://127.0.0.1:" + s.port();
+            // Fetch the watched match through the sidecar to populate the archive.
+            http.send(HttpRequest.newBuilder(URI.create(base + "/api/matches/777")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            HttpResponse<String> stats = http.send(
+                    HttpRequest.newBuilder(URI.create(base + "/stats")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(stats.statusCode()).isEqualTo(200);
+            // The three watched-archive fields actually reach the serialized /stats body (a typo or
+            // dropped append in handleStats would fail here).
+            assertThat(stats.body())
+                    .contains("\"l2Enabled\":true")
+                    .contains("\"l2WatchedStore\":1")
+                    .contains("\"pinnedRows\":1")
+                    .contains("\"pinnedBytes\":" + watchedMatch.getBytes(StandardCharsets.UTF_8).length);
+        }
+    }
+
+    @Test
     void tokenGatedSidecarRequiresMatchingHeaderForApiButNotHealth() throws Exception {
         stubUpstream("/api/heroes", 200, "[]");
         try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "s3cret")) {

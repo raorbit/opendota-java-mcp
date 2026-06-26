@@ -5,6 +5,7 @@ import com.raorbit.opendota.client.OpenDotaException;
 
 import java.sql.SQLException;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -55,11 +56,20 @@ public final class L2CachingGateway implements AutoCloseable {
     private final OpenDotaClient client;
     private final L2Store store;
     private final L2Config config;
+    /**
+     * Watched-player detector: an alternation over the configured {@code account_id}s, built once from
+     * {@link L2Config#watchedAccountIds()}, or {@code null} when no players are watched (the archive is
+     * inert). The quoted {@code "account_id"} key avoids suffix keys like {@code leaderboard_account_id};
+     * the trailing {@code (?![0-9])} stops {@code 123} matching inside {@code 1234567} (spec §6.5). Dep-
+     * free, like {@link #isParsedMatch} — a regex scan over the opaque body, not a JSON parse.
+     */
+    private final Pattern watchedPattern;
 
     // --- counters (spec §8) ---
     private final AtomicLong l2Hit = new AtomicLong();
     private final AtomicLong l2Miss = new AtomicLong();
     private final AtomicLong l2Store = new AtomicLong();
+    private final AtomicLong l2WatchedStore = new AtomicLong();
     private final AtomicLong l2StoreSkippedUnparsed = new AtomicLong();
     private final AtomicLong l2PatchBust = new AtomicLong();
     private final AtomicLong l2Error = new AtomicLong();
@@ -77,6 +87,23 @@ public final class L2CachingGateway implements AutoCloseable {
         this.client = client;
         this.store = store;
         this.config = config;
+        this.watchedPattern = buildWatchedPattern(config.watchedAccountIds());
+    }
+
+    /**
+     * Compile the watched-player detector for {@code accountIds}, or {@code null} when the set is empty
+     * (so the hot path skips the scan entirely). The ids are numeric (parsed by
+     * {@link L2Config#parseWatchedPlayers}), so they need no regex escaping.
+     */
+    private static Pattern buildWatchedPattern(Set<Long> accountIds) {
+        if (accountIds == null || accountIds.isEmpty()) {
+            return null;
+        }
+        StringJoiner ids = new StringJoiner("|");
+        for (Long id : accountIds) {
+            ids.add(Long.toString(id));
+        }
+        return Pattern.compile("\"account_id\"\\s*:\\s*(" + ids + ")(?![0-9])");
     }
 
     /**
@@ -111,7 +138,22 @@ public final class L2CachingGateway implements AutoCloseable {
 
         // Miss: delegate to the client (L1 / single-flight / rate limiting happen here).
         l2Miss.incrementAndGet();
-        String body = client.getJson(path);
+        String body;
+        try {
+            body = client.getJson(path);
+        } catch (OpenDotaException ex) {
+            // Save-now-upgrade-later resilience (spec §6.5): the only miss that can hold a stored body
+            // here is the forced re-fetch of an UNPARSED PINNED match (lookup() returns null for it to
+            // attempt an upgrade). If that re-fetch fails (e.g. an upstream outage), serve the retained
+            // unparsed body — the watched archive exists precisely so the data survives an outage —
+            // rather than failing the request. Any other miss (no stored row) re-throws unchanged.
+            L2Store.Entry stale = stalePinned(path);
+            if (stale != null) {
+                l2Hit.incrementAndGet();
+                return stale.body();
+            }
+            throw ex;
+        }
 
         // Conditional store: PERMANENT parse-gates matches; TTL stamps expires_at.
         maybeStore(path, body, c, patchScoped, currentPatchId);
@@ -139,6 +181,17 @@ public final class L2CachingGateway implements AutoCloseable {
                     && e.patchId() != null && !currentPatchId.equals(e.patchId())) {
                 return null;
             }
+            // Save-now-upgrade-later (spec §6.5): an UNPARSED PINNED match is served from L2 until its
+            // re-fetch stamp (expires_at) elapses, then force a re-fetch (return null) so maybeStore can
+            // upgrade it in place to the parsed body once OpenDota parses. This bounds the re-fetch to at
+            // most once per watchedRefetchMillis rather than on every access. A null expires_at on an
+            // unparsed pinned row (e.g. pre-retry-after data, or a 0 interval) is treated as due now.
+            if (Classification.PINNED.name().equals(e.classification())
+                    && MATCH_ID.matcher(stripQuery(path)).matches()
+                    && !isParsedMatch(e.body())
+                    && (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis())) {
+                return null;
+            }
             return e;
         } catch (SQLException ex) {
             recordError("L2 read", path, ex);
@@ -147,10 +200,40 @@ public final class L2CachingGateway implements AutoCloseable {
     }
 
     /**
+     * The stored PINNED (watched-archive) row for {@code path} regardless of parse state, used ONLY as
+     * the outage fallback in {@link #get} when a forced re-fetch of an unparsed pinned match fails.
+     * {@code null} if there is no current-schema PINNED row (so an ordinary miss still propagates its
+     * error) or the read itself fails.
+     */
+    private L2Store.Entry stalePinned(String path) {
+        try {
+            L2Store.Entry e = store.get(path);
+            if (e != null && e.schemaVersion() == L2Store.SCHEMA_VERSION
+                    && Classification.PINNED.name().equals(e.classification())) {
+                return e;
+            }
+        } catch (SQLException ex) {
+            recordError("L2 stale read", path, ex);
+        }
+        return null;
+    }
+
+    /** Delete a PINNED row whose player is no longer watched (best-effort; an L2 error is a no-op). */
+    private void reclaimPinned(String path) {
+        try {
+            store.deletePinned(path);
+        } catch (SQLException ex) {
+            recordError("L2 reclaim", path, ex);
+        }
+    }
+
+    /**
      * Conditionally store the body, branching on classification. PERMANENT keeps its v1 behaviour
      * (parse-gate matches, stamp {@code patch_id}, {@code expires_at = NULL}). TTL stores with
      * {@code expires_at = now + ttlFor(path)}, {@code patch_id = NULL}, and no parse-gate (parse-gating
-     * is matches/PERMANENT only). Counts and eviction follow.
+     * is matches/PERMANENT only). A PERMANENT match whose body mentions a watched {@code account_id} is
+     * refined to {@link Classification#PINNED} (spec §6.5) — stored even when unparsed, exempt from the
+     * main caps, and governed by the watched budget. Counts and eviction follow.
      */
     private void maybeStore(String path, String body, Classification c,
                             boolean patchScoped, String currentPatchId) {
@@ -186,14 +269,41 @@ public final class L2CachingGateway implements AutoCloseable {
                 return;
             }
             boolean isMatch = MATCH_ID.matcher(stripQuery(path)).matches();
-            if (isMatch && !isParsedMatch(body)) {
-                // Unparsed match: do NOT store permanently — re-fetch next time (spec §5.1).
-                l2StoreSkippedUnparsed.incrementAndGet();
-                return;
+            boolean parsed = !isMatch || isParsedMatch(body);
+            boolean watched = isMatch && watchedPattern != null && watchedPattern.matcher(body).find();
+            if (watched) {
+                // A watched-player match → PINNED (the personal archive, spec §6.5). Store it even when
+                // UNPARSED (save now, upgrade later) — bypassing the isParsedMatch skip below — so the
+                // data is retained. PINNED is permanent + exempt from the main caps (patch_id null). An
+                // UNPARSED row carries a re-fetch stamp (expires_at = now + watchedRefetchMillis) so it
+                // is served from L2 between hourly re-checks rather than re-fetched on every access;
+                // lookup() forces a re-fetch once the stamp elapses, and the parsed body is stored with
+                // no expiry (it serves straight from L2 thereafter). evictExpired excludes PINNED, so the
+                // stamp never deletes the archive row.
+                storeClass = Classification.PINNED;
+                long refetchMs = config.watchedRefetchMillis();
+                // Parsed (final body) or a 0 interval (always re-fetch) → no stamp; otherwise stamp the
+                // retry-after. A null stamp on an unparsed pinned row is treated as "due now" by lookup().
+                expiresAt = (parsed || refetchMs <= 0) ? null : now + refetchMs;
+                patchId = null;
+            } else {
+                if (isMatch && !parsed) {
+                    // Unparsed, non-watched match. If a PINNED row exists at this key its player is no
+                    // longer watched (the body no longer matches), so reclaim it (spec §6.5) — it stops
+                    // counting against the watched budget and force-missing. Then do NOT store the
+                    // unparsed body permanently — re-fetch next time (spec §5.1). (A parsed non-watched
+                    // match instead falls through and overwrites any PINNED row as PERMANENT via put(),
+                    // which nets the class transition.)
+                    if (stalePinned(path) != null) {
+                        reclaimPinned(path);
+                    }
+                    l2StoreSkippedUnparsed.incrementAndGet();
+                    return;
+                }
+                storeClass = Classification.PERMANENT;
+                expiresAt = null;   // PERMANENT: never expires by time.
+                patchId = patchScoped ? currentPatchId : null;
             }
-            storeClass = Classification.PERMANENT;
-            expiresAt = null;   // PERMANENT: never expires by time.
-            patchId = patchScoped ? currentPatchId : null;
         }
 
         // Collapse a burst of concurrent single-flight misses for the same path into ONE write: the
@@ -205,6 +315,9 @@ public final class L2CachingGateway implements AutoCloseable {
         try {
             store.put(path, body, storeClass, now, expiresAt, L2Store.SCHEMA_VERSION, patchId);
             l2Store.incrementAndGet();
+            if (storeClass == Classification.PINNED) {
+                l2WatchedStore.incrementAndGet();
+            }
             enforceCaps();
         } catch (SQLException ex) {
             recordError("L2 store", path, ex);
@@ -219,7 +332,8 @@ public final class L2CachingGateway implements AutoCloseable {
             // Delegate to the store so the check-and-evict happens under one lock; doing it here across
             // separate rowCount()/totalBodyBytes()/evictOldest() calls let concurrent writers each see
             // the same overage and over-evict (N x the surplus) under the virtual-thread executor.
-            store.enforceCaps(config.maxRows(), config.maxBytes());
+            store.enforceCaps(config.maxRows(), config.maxBytes(),
+                    config.watchedMaxRows(), config.watchedMaxBytes(), System.currentTimeMillis());
         } catch (SQLException ex) {
             recordError("L2 eviction", "(cap)", ex);
         }
@@ -457,15 +571,23 @@ public final class L2CachingGateway implements AutoCloseable {
                 + ex.getClass().getSimpleName());
     }
 
-    /** Immutable snapshot of the L2 counters for a {@code /stats} endpoint (spec §8). */
-    public record L2Stats(long l2Hit, long l2Miss, long l2Store, long l2StoreSkippedUnparsed,
-                          long l2PatchBust, long l2Error, long noStore) {
+    /**
+     * Immutable snapshot of the L2 counters for a {@code /stats} endpoint (spec §8). {@code l2WatchedStore}
+     * counts PINNED <em>store operations</em>, not distinct matches — an unparsed watched match is re-stored
+     * on each access until it parses (see the upgrade path in {@link #maybeStore}), so this can exceed the
+     * number of archived matches. {@code pinnedRows}/{@code pinnedBytes} are the store's current watched-
+     * archive totals (the durable, deduplicated size of the archive against its budget).
+     */
+    public record L2Stats(long l2Hit, long l2Miss, long l2Store, long l2WatchedStore,
+                          long l2StoreSkippedUnparsed, long l2PatchBust, long l2Error, long noStore,
+                          long pinnedRows, long pinnedBytes) {
     }
 
     /** Snapshot the current counters. */
     public L2Stats stats() {
-        return new L2Stats(l2Hit.get(), l2Miss.get(), l2Store.get(), l2StoreSkippedUnparsed.get(),
-                l2PatchBust.get(), l2Error.get(), noStore.get());
+        return new L2Stats(l2Hit.get(), l2Miss.get(), l2Store.get(), l2WatchedStore.get(),
+                l2StoreSkippedUnparsed.get(), l2PatchBust.get(), l2Error.get(), noStore.get(),
+                store.pinnedRowCount(), store.pinnedBodyBytes());
     }
 
     /** Close the SQLite store and the wrapped client (mirrors the server→client close chain). */
