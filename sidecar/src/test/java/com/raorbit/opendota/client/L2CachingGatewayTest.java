@@ -163,6 +163,18 @@ class L2CachingGatewayTest {
                 watchedRefetchMillis, autoParse, Duration.ofHours(1).toMillis());
     }
 
+    /**
+     * Wait (up to ~2s) for the gateway's async access-driven auto-parse to issue at least {@code want}
+     * parse requests. The POST now runs on {@link com.raorbit.opendota.sidecar.WatchedAutoParser}'s daemon
+     * executor (so a GET never blocks on it), so the W8 positive assertions must await it rather than read
+     * the counter the instant gw.get() returns.
+     */
+    private static void awaitParseRequested(L2CachingGateway gw, long want) throws InterruptedException {
+        for (int i = 0; i < 200 && gw.stats().parseRequested() < want; i++) {
+            Thread.sleep(10);
+        }
+    }
+
     private static long countRows(Path db) throws SQLException {
         try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db.toAbsolutePath());
              Statement st = c.createStatement();
@@ -952,6 +964,8 @@ class L2CachingGatewayTest {
              L2CachingGateway gw = new L2CachingGateway(client, store,
                      config(db, watching(WATCHED_ID), 0L, true))) {
             gw.get("/matches/777");
+            // The POST is async (fire-and-forget off the GET thread), so await it before asserting.
+            awaitParseRequested(gw, 1);
             assertThat(client.posts).containsExactly("/request/777");
             assertThat(gw.stats().parseRequested()).isEqualTo(1);
 
@@ -988,6 +1002,27 @@ class L2CachingGatewayTest {
              L2CachingGateway gw = new L2CachingGateway(c3, store, config(d, watching(WATCHED_ID), 0L, false))) {
             gw.get("/matches/777");
             assertThat(c3.posts).isEmpty();
+            assertThat(gw.stats().parseRequested()).isZero();
+        }
+    }
+
+    // ---- W9: a /matches/<huge-id> unparsed watched body must NOT throw and must NOT request a parse ----
+    @Test
+    void hugeMatchIdDoesNotThrowOrRequestParse(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // A 20+-digit match id overflows a long: matchIdOf must return -1L (not throw), and the call site
+        // skips the parse request for a non-positive id. The path still classifies PERMANENT (digits only).
+        String hugePath = "/matches/99999999999999999999";
+        String body = "{\"match_id\":99999999999999999999,"
+                + "\"od_data\":{\"has_api\":true,\"has_parsed\":false},"
+                + "\"players\":[{\"account_id\":12345}]}";
+        CountingClient client = new CountingClient().with(hugePath, body);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, watching(WATCHED_ID), 0L, true))) {
+            assertThatCode(() -> assertThat(gw.get(hugePath)).isEqualTo(body)).doesNotThrowAnyException();
+            // No parse request was issued for the unparseable id (and none could have raced in async).
+            assertThat(client.posts).isEmpty();
             assertThat(gw.stats().parseRequested()).isZero();
         }
     }
