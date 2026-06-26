@@ -171,10 +171,13 @@ public final class SidecarHttpServer implements AutoCloseable {
                         .append(",\"l2Hit\":").append(l2.l2Hit())
                         .append(",\"l2Miss\":").append(l2.l2Miss())
                         .append(",\"l2Store\":").append(l2.l2Store())
+                        .append(",\"l2WatchedStore\":").append(l2.l2WatchedStore())
                         .append(",\"l2StoreSkippedUnparsed\":").append(l2.l2StoreSkippedUnparsed())
                         .append(",\"l2PatchBust\":").append(l2.l2PatchBust())
                         .append(",\"l2Error\":").append(l2.l2Error())
-                        .append(",\"noStore\":").append(l2.noStore());
+                        .append(",\"noStore\":").append(l2.noStore())
+                        .append(",\"pinnedRows\":").append(l2.pinnedRows())
+                        .append(",\"pinnedBytes\":").append(l2.pinnedBytes());
             } else {
                 json.append(",\"l2Enabled\":false");
             }

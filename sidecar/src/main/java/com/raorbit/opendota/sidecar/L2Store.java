@@ -65,6 +65,13 @@ public final class L2Store implements AutoCloseable {
     private final AtomicLong currentRows = new AtomicLong();
     private final AtomicLong currentBytes = new AtomicLong();
 
+    // Pinned (watched-archive) running totals, a strict subset of the global totals above. Seeded in
+    // initCounters() from a classification='PINNED' COUNT/SUM and maintained in put()/evictOldestPinned()
+    // exactly like the global totals. The main caps are enforced against (current - pinned) so a growing
+    // archive never forces ordinary-cache eviction; the watched caps are enforced against these (spec §6.5).
+    private final AtomicLong pinnedRows = new AtomicLong();
+    private final AtomicLong pinnedBytes = new AtomicLong();
+
     /**
      * Open (creating if necessary) a store at {@code dbPath} using the given schema version. The
      * parent directory is created if missing.
@@ -215,7 +222,7 @@ public final class L2Store implements AutoCloseable {
         return s.getBytes(StandardCharsets.UTF_8).length;
     }
 
-    /** Seed the running row/byte totals from the table once, after migration. */
+    /** Seed the global and pinned running row/byte totals from the table once, after migration. */
     private void initCounters() throws SQLException {
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
@@ -223,6 +230,17 @@ public final class L2Store implements AutoCloseable {
             if (rs.next()) {
                 currentRows.set(rs.getLong(1));
                 currentBytes.set(rs.getLong(2));
+            }
+        }
+        // Seed the pinned sub-totals separately (a watched archive survives a restart, so they must be
+        // recovered from disk, not assumed zero). Same UTF-8 byte basis as the global seed above.
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) "
+                             + "FROM cache_entries WHERE classification = 'PINNED'")) {
+            if (rs.next()) {
+                pinnedRows.set(rs.getLong(1));
+                pinnedBytes.set(rs.getLong(2));
             }
         }
     }
@@ -314,16 +332,20 @@ public final class L2Store implements AutoCloseable {
     public synchronized void put(String path, String body, Classification classification, long storedAt,
                                  Long expiresAt, int schemaVersion, String patchId) throws SQLException {
         // INSERT OR REPLACE may overwrite an existing row, so net out the old body's bytes (and skip
-        // the row increment) to keep the running totals exact across overwrites.
+        // the row increment) to keep the running totals exact across overwrites. Also read the old
+        // classification so the pinned sub-totals net out correctly when a row crosses the PINNED
+        // boundary (e.g. a PERMANENT match that, on re-store, upgrades to PINNED).
         long oldBytes = 0L;
         boolean existed = false;
+        boolean wasPinned = false;
         try (PreparedStatement sel = conn.prepareStatement(
-                "SELECT LENGTH(CAST(body AS BLOB)) FROM cache_entries WHERE path = ?")) {
+                "SELECT LENGTH(CAST(body AS BLOB)), classification FROM cache_entries WHERE path = ?")) {
             sel.setString(1, path);
             try (ResultSet rs = sel.executeQuery()) {
                 if (rs.next()) {
                     existed = true;
                     oldBytes = rs.getLong(1);
+                    wasPinned = Classification.PINNED.name().equals(rs.getString(2));
                 }
             }
         }
@@ -348,10 +370,23 @@ public final class L2Store implements AutoCloseable {
             }
             ps.executeUpdate();
         }
+        long newBytes = utf8Len(body);
         if (!existed) {
             currentRows.incrementAndGet();
         }
-        currentBytes.addAndGet(utf8Len(body) - oldBytes);
+        currentBytes.addAndGet(newBytes - oldBytes);
+        // Maintain the pinned sub-totals by the net change across the PINNED boundary: +1 row / +newBytes
+        // if the new row is pinned, -1 row / -oldBytes if the replaced row was pinned (each conditional).
+        boolean isPinned = classification == Classification.PINNED;
+        if (isPinned) {
+            if (!wasPinned) {
+                pinnedRows.incrementAndGet();
+            }
+            pinnedBytes.addAndGet(newBytes - (wasPinned ? oldBytes : 0L));
+        } else if (wasPinned) {
+            pinnedRows.decrementAndGet();
+            pinnedBytes.addAndGet(-oldBytes);
+        }
     }
 
     /** Current number of rows in {@code cache_entries} (O(1) running total, maintained on writes). */
@@ -369,9 +404,21 @@ public final class L2Store implements AutoCloseable {
         return currentBytes.get();
     }
 
+    /** Current number of PINNED (watched-archive) rows (O(1) running total). */
+    public long pinnedRowCount() {
+        return pinnedRows.get();
+    }
+
+    /** Total body bytes across PINNED (watched-archive) rows (O(1) running total, UTF-8 bytes). */
+    public long pinnedBodyBytes() {
+        return pinnedBytes.get();
+    }
+
     /**
-     * Evict the {@code n} oldest rows by {@code stored_at} ascending (LRU-ish, spec §6.4). PERMANENT
-     * rows are <em>not</em> exempt — once over a cap the oldest go regardless of class.
+     * Evict the {@code n} oldest <em>non-PINNED</em> rows by {@code stored_at} ascending (LRU-ish,
+     * spec §6.4). PERMANENT (non-pinned) rows are <em>not</em> exempt — once over a cap the oldest go
+     * regardless of class — but PINNED (watched-archive) rows are skipped entirely: they are governed
+     * by the separate watched budget ({@link #evictOldestPinned}), never the main cap.
      *
      * @return the number of rows actually deleted
      */
@@ -383,7 +430,8 @@ public final class L2Store implements AutoCloseable {
         // summed and deleted rows are guaranteed identical even when stored_at values tie (a separate
         // SUM subquery could break the LIMIT tie differently from the DELETE and skew the byte total).
         String sql = "DELETE FROM cache_entries WHERE path IN "
-                + "(SELECT path FROM cache_entries ORDER BY stored_at ASC LIMIT ?) "
+                + "(SELECT path FROM cache_entries WHERE classification != 'PINNED' "
+                + "ORDER BY stored_at ASC LIMIT ?) "
                 + "RETURNING LENGTH(CAST(body AS BLOB))";
         int deleted = 0;
         long freedBytes = 0L;
@@ -402,6 +450,40 @@ public final class L2Store implements AutoCloseable {
     }
 
     /**
+     * Evict the {@code n} oldest <em>PINNED</em> rows by {@code stored_at} ascending — the watched
+     * archive's own LRU eviction, run only when a positive watched cap is exceeded (spec §6.5).
+     * Decrements <em>both</em> the global totals and the pinned sub-totals by the deleted rows, since
+     * a pinned row counts in both.
+     *
+     * @return the number of rows actually deleted
+     */
+    public synchronized int evictOldestPinned(int n) throws SQLException {
+        if (n <= 0) {
+            return 0;
+        }
+        String sql = "DELETE FROM cache_entries WHERE path IN "
+                + "(SELECT path FROM cache_entries WHERE classification = 'PINNED' "
+                + "ORDER BY stored_at ASC LIMIT ?) "
+                + "RETURNING LENGTH(CAST(body AS BLOB))";
+        int deleted = 0;
+        long freedBytes = 0L;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, n);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    deleted++;
+                    freedBytes += rs.getLong(1);
+                }
+            }
+        }
+        currentRows.addAndGet(-deleted);
+        currentBytes.addAndGet(-freedBytes);
+        pinnedRows.addAndGet(-deleted);
+        pinnedBytes.addAndGet(-freedBytes);
+        return deleted;
+    }
+
+    /**
      * Bring the table within both the row-count and byte caps, evicting oldest-first, all under this
      * store's monitor so the check and the eviction are atomic — concurrent callers can't each read
      * the same overage and over-evict (N x the surplus). Best-effort (spec §6.4).
@@ -409,38 +491,100 @@ public final class L2Store implements AutoCloseable {
      * @return the total number of rows evicted
      */
     public synchronized int enforceCaps(long maxRows, long maxBytes) throws SQLException {
-        return enforceCaps(maxRows, maxBytes, System.currentTimeMillis());
+        return enforceCaps(maxRows, maxBytes, 0, 0, System.currentTimeMillis());
     }
 
     /**
-     * As {@link #enforceCaps(long, long)} but with an explicit {@code now} (so tests can drive expiry
-     * deterministically). Reclaims expired TTL rows <em>first</em>, so a dead-but-newer TTL row can't
-     * push out a live-but-older PERMANENT row and dead rows don't consume the caps.
+     * As {@link #enforceCaps(long, long)} but with an explicit {@code now} and no watched caps
+     * ({@code 0,0} = the watched archive is unbounded). Kept as a delegator so existing callers/tests
+     * compile unchanged.
      *
      * @return the total number of rows evicted (expired + cap)
      */
     public synchronized int enforceCaps(long maxRows, long maxBytes, long now) throws SQLException {
+        return enforceCaps(maxRows, maxBytes, 0, 0, now);
+    }
+
+    /**
+     * Bring the table within both the main caps and the watched-archive caps, all under this store's
+     * monitor so the check and the eviction are atomic (spec §6.4, §6.5). The two budgets are
+     * independent:
+     * <ul>
+     *   <li><b>Main caps</b> ({@code maxRows}/{@code maxBytes}) govern <em>non-pinned</em> data only,
+     *       compared against {@code current - pinned}, and {@link #evictOldest} never touches a PINNED
+     *       row — so a growing archive can't force ordinary-cache eviction, and the main caps stay
+     *       hard caps on ordinary data.</li>
+     *   <li><b>Watched caps</b> ({@code watchedMaxRows}/{@code watchedMaxBytes}) govern <em>pinned</em>
+     *       data, compared against the pinned sub-totals and enforced via {@link #evictOldestPinned};
+     *       {@code 0} = unlimited (never delete pinned rows on that axis), so they are skipped.</li>
+     * </ul>
+     * Reclaims expired TTL rows <em>first</em>, so a dead-but-newer TTL row can't push out a
+     * live-but-older PERMANENT row and dead rows don't consume the caps.
+     *
+     * @return the total number of rows evicted (expired + main cap + watched cap)
+     */
+    public synchronized int enforceCaps(long maxRows, long maxBytes, long watchedMaxRows,
+                                        long watchedMaxBytes, long now) throws SQLException {
         int total = evictExpired(now);
-        long overRows = currentRows.get() - maxRows;
-        if (overRows > 0) {
-            total += evictOldest((int) Math.min(Integer.MAX_VALUE, overRows));
-        }
-        // Byte cap: evict oldest in small batches until under the byte budget (or empty).
-        while (currentBytes.get() > maxBytes && currentRows.get() > 0) {
-            int deleted = evictOldest((int) Math.max(1L, Math.min(64L, currentRows.get())));
+
+        // --- main caps: against NON-pinned counts (current - pinned) ---
+        long nonPinnedOverRows = (currentRows.get() - pinnedRows.get()) - maxRows;
+        // Bounded loop (not a single shot): now that evictOldest excludes PINNED, one call could
+        // under-delete if the LIMIT window is full of pinned rows, so loop until under cap or no
+        // progress (deleted == 0 break).
+        while (nonPinnedOverRows > 0) {
+            int deleted = evictOldest((int) Math.min(Integer.MAX_VALUE, nonPinnedOverRows));
             if (deleted == 0) {
                 break;
             }
             total += deleted;
+            nonPinnedOverRows = (currentRows.get() - pinnedRows.get()) - maxRows;
+        }
+        // Byte cap: evict oldest non-pinned in small batches until the non-pinned byte total is under
+        // budget (or no non-pinned rows remain).
+        while ((currentBytes.get() - pinnedBytes.get()) > maxBytes
+                && (currentRows.get() - pinnedRows.get()) > 0) {
+            int deleted = evictOldest((int) Math.max(1L,
+                    Math.min(64L, currentRows.get() - pinnedRows.get())));
+            if (deleted == 0) {
+                break;
+            }
+            total += deleted;
+        }
+
+        // --- watched caps: against PINNED counts; 0 = unlimited (skip) ---
+        if (watchedMaxRows > 0) {
+            long overPinnedRows = pinnedRows.get() - watchedMaxRows;
+            while (overPinnedRows > 0) {
+                int deleted = evictOldestPinned((int) Math.min(Integer.MAX_VALUE, overPinnedRows));
+                if (deleted == 0) {
+                    break;
+                }
+                total += deleted;
+                overPinnedRows = pinnedRows.get() - watchedMaxRows;
+            }
+        }
+        if (watchedMaxBytes > 0) {
+            // Evict the archive's oldest pinned rows one at a time until the pinned byte total fits, so
+            // a large body can't over-evict newer pinned rows past the budget (the watched archive is the
+            // user's personal data — prefer keeping as much as fits to a coarse batch overshoot).
+            while (pinnedBytes.get() > watchedMaxBytes && pinnedRows.get() > 0) {
+                int deleted = evictOldestPinned(1);
+                if (deleted == 0) {
+                    break;
+                }
+                total += deleted;
+            }
         }
         return total;
     }
 
     /**
      * Delete every TTL row whose {@code expires_at} has passed ({@code <= now}), reclaiming dead rows
-     * before they count against the caps or outlive a still-valid PERMANENT row. PERMANENT rows have
-     * {@code expires_at = NULL} and are never matched. A single {@code DELETE ... RETURNING} so the
-     * deleted rows and their summed bytes are the same set (mirrors {@link #patchBust()}).
+     * before they count against the caps or outlive a still-valid PERMANENT row. PERMANENT <em>and
+     * PINNED</em> rows have {@code expires_at = NULL} and are never matched (the watched archive is
+     * permanent). A single {@code DELETE ... RETURNING} so the deleted rows and their summed bytes are
+     * the same set (mirrors {@link #patchBust()}).
      *
      * <p>Liveness is request-driven (spec §6.4): this runs inside {@link #enforceCaps}, i.e. after a
      * store — a write-idle/read-heavy db still holds dead rows between stores, which the read predicate
@@ -469,7 +613,8 @@ public final class L2Store implements AutoCloseable {
 
     /**
      * Patch-bust (spec §5.2): delete every PERMANENT row whose {@code patch_id IS NOT NULL} (the
-     * patch-scoped static rows). Match rows have {@code patch_id = NULL} and survive.
+     * patch-scoped static rows). Match rows have {@code patch_id = NULL} and survive; PINNED rows are
+     * a distinct classification (never {@code 'PERMANENT'}) so they too are intentionally excluded.
      *
      * @return the number of rows deleted
      */
