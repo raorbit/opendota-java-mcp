@@ -6,7 +6,6 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.logging.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -34,7 +33,6 @@ import org.springframework.core.env.Environment;
  */
 @Configuration(proxyBeanMethods = false)
 @Profile("http")
-@EnableConfigurationProperties(OpenDotaProperties.class)
 public class HttpMcpConfig {
 
     private static final Logger LOG = Logger.getLogger(HttpMcpConfig.class.getName());
@@ -92,7 +90,6 @@ public class HttpMcpConfig {
      * bean entirely rather than register a disabled one.)
      */
     @Bean
-    @Profile("http")
     @ConditionalOnProperty(name = "opendota.http.auth-mode", havingValue = "bearer", matchIfMissing = true)
     FilterRegistrationBean<BearerAuthFilter> bearerAuthFilterRegistration() {
         FilterRegistrationBean<BearerAuthFilter> registration = new FilterRegistrationBean<>();

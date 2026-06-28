@@ -149,6 +149,12 @@
                     <groupId>org.springframework.ai</groupId>
                     <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
                 </dependency>
+                <!-- Real /actuator/health liveness endpoint for a fronting proxy/tunnel to probe
+                     (BearerAuthFilter leaves it un-gated; only 'health' is exposed). -->
+                <dependency>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-actuator</artifactId>
+                </dependency>
             </dependencies>
             <build>
                 <plugins>
@@ -182,9 +188,11 @@
                         <artifactId>spring-boot-maven-plugin</artifactId>
                         <configuration>
                             <!--
-                              Attach as a SECOND, classified artifact so the plain jar
-                              (target/opendota-mcp-1.2.0.jar) is untouched and only the
-                              http build carries the web server.
+                              Attach the runnable fat jar as a SECOND, classified artifact
+                              (target/opendota-mcp-<ver>-http.jar) so the DEFAULT build's jar
+                              name is never repackaged with the web server. NOTE: under -Phttp
+                              the unclassified target/opendota-mcp-<ver>.jar is left as a thin,
+                              NON-executable jar (no launcher) — run the '-http' jar, not it.
                             -->
                             <classifier>http</classifier>
                         </configuration>

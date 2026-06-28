@@ -17,8 +17,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *
  * <p>The presented token is compared to the configured secret with a constant-time
  * {@link MessageDigest#isEqual} comparison, mirroring the sidecar's {@code authorized()} gate.
- * Liveness probes ({@code /health}, {@code /actuator/health}) are left open so a fronting
- * proxy/tunnel can check the instance is up, matching the sidecar leaving {@code /health} open.
+ * The actuator liveness probe ({@code /actuator/health}) is left open so a fronting
+ * proxy/tunnel can check the instance is up; everything else requires the bearer.
  *
  * <p>This bearer is the app-level defense-in-depth check. Claude's in-app custom-connector OAuth
  * flow is terminated by the fronting proxy/tunnel, which injects this header; see
@@ -37,9 +37,11 @@ public class BearerAuthFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        // Leave liveness endpoints un-gated so the proxy/tunnel and orchestrators can probe.
+        // Leave ONLY the actuator health endpoint un-gated so a proxy/tunnel can probe liveness.
+        // Exact matches (not startsWith): sibling/sub paths like /actuator/health/{component} —
+        // which can leak per-component status — stay behind the bearer gate.
         String path = request.getRequestURI();
-        return "/health".equals(path) || path.startsWith("/actuator/health");
+        return "/actuator/health".equals(path) || "/actuator/health/".equals(path);
     }
 
     @Override
