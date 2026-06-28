@@ -60,6 +60,12 @@ public class OpenDotaProperties {
      */
     private String sidecarToken;
 
+    /**
+     * HTTP (remote-MCP) transport settings, bound from {@code opendota.http.*}. Used only
+     * by the opt-in {@code http} Spring profile (the {@code -Phttp} build); inert otherwise.
+     */
+    private final Http http = new Http();
+
     public int getCacheMaxEntries() {
         return cacheMaxEntries;
     }
@@ -130,5 +136,56 @@ public class OpenDotaProperties {
 
     public void setSidecarToken(String sidecarToken) {
         this.sidecarToken = sidecarToken;
+    }
+
+    public Http getHttp() {
+        return http;
+    }
+
+    /**
+     * Settings for the opt-in HTTP (remote-MCP) transport, bound from {@code opendota.http.*}
+     * (relaxed-binding env {@code OPENDOTA_HTTP_*}). Only meaningful under the {@code http}
+     * Spring profile; the default stdio build never reads these.
+     */
+    public static class Http {
+
+        /** How the HTTP MCP endpoint is authenticated: {@code none} or {@code bearer}. */
+        public enum AuthMode {
+            /** No auth filter. Only permitted on a loopback bind (the startup guard refuses otherwise). */
+            NONE,
+            /** Require {@code Authorization: Bearer <token>} matching {@link #bearerToken}. */
+            BEARER
+        }
+
+        /**
+         * Auth mode for the HTTP MCP endpoint. Defaults to {@link AuthMode#BEARER} (fail-safe):
+         * a bearer token must be presented. Set to {@code none} only behind a trusted fronting
+         * proxy on a loopback bind; the fail-closed startup guard refuses {@code none} (or a
+         * missing token) on a non-loopback bind regardless.
+         */
+        private AuthMode authMode = AuthMode.BEARER;
+
+        /**
+         * Expected bearer secret, compared constant-time. Supply via env
+         * {@code OPENDOTA_HTTP_BEARER_TOKEN}; treat as a secret and never commit it
+         * (same handling as {@code OPENDOTA_API_KEY} / {@code OPENDOTA_SIDECAR_TOKEN}).
+         */
+        private String bearerToken;
+
+        public AuthMode getAuthMode() {
+            return authMode;
+        }
+
+        public void setAuthMode(AuthMode authMode) {
+            this.authMode = authMode;
+        }
+
+        public String getBearerToken() {
+            return bearerToken;
+        }
+
+        public void setBearerToken(String bearerToken) {
+            this.bearerToken = bearerToken;
+        }
     }
 }
