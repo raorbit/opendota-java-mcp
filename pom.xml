@@ -125,4 +125,80 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+          Opt-in HTTP (remote-MCP) build. The DEFAULT build (no profile) stays pure
+          stdio: the core spring-ai-starter-mcp-server brings NO web server, so the
+          default jar is byte-behavior-identical to today.
+
+          'mvn -Phttp package' ADDS the Spring AI webmvc MCP server starter (which
+          transitively pulls spring-boot-starter-web / embedded Tomcat + the
+          Streamable-HTTP transport) and attaches a distinct 'http'-classified jar
+          (target/opendota-mcp-1.2.0-http.jar) so stdio users never grab the web jar.
+          Activate the matching Spring profile at runtime with
+          -Dspring.profiles.active=http (loads application-http.properties).
+
+          The version of the webmvc starter is managed by the spring-ai-bom 1.1.8
+          imported above — do NOT declare a <version> here.
+        -->
+        <profile>
+            <id>http</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.springframework.ai</groupId>
+                    <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
+                </dependency>
+                <!-- Real /actuator/health liveness endpoint for a fronting proxy/tunnel to probe
+                     (BearerAuthFilter leaves it un-gated; only 'health' is exposed). -->
+                <dependency>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-actuator</artifactId>
+                </dependency>
+            </dependencies>
+            <build>
+                <plugins>
+                    <!--
+                      Compile the http-only sources (src/http/java) ONLY in this profile.
+                      They depend on the servlet/web API (jakarta.servlet, OncePerRequestFilter,
+                      FilterRegistrationBean) that the webmvc starter brings, so they must NOT be
+                      on the default compile path — keeping the default build web-free.
+                    -->
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>build-helper-maven-plugin</artifactId>
+                        <version>3.6.1</version>
+                        <executions>
+                            <execution>
+                                <id>add-http-source</id>
+                                <phase>generate-sources</phase>
+                                <goals>
+                                    <goal>add-source</goal>
+                                </goals>
+                                <configuration>
+                                    <sources>
+                                        <source>src/http/java</source>
+                                    </sources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-maven-plugin</artifactId>
+                        <configuration>
+                            <!--
+                              Attach the runnable fat jar as a SECOND, classified artifact
+                              (target/opendota-mcp-<ver>-http.jar) so the DEFAULT build's jar
+                              name is never repackaged with the web server. NOTE: under -Phttp
+                              the unclassified target/opendota-mcp-<ver>.jar is left as a thin,
+                              NON-executable jar (no launcher) — run the '-http' jar, not it.
+                            -->
+                            <classifier>http</classifier>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

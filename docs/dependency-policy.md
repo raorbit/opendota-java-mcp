@@ -17,7 +17,10 @@ and `CLAUDE.md`):
 - Maven parent: `spring-boot-starter-parent` **3.5.15**
 - Spring AI BOM: **1.1.8**
 - MCP server starter: `org.springframework.ai:spring-ai-starter-mcp-server`
-  (the **core stdio** starter — not `-webmvc` / `-webflux`)
+  (the **core stdio** starter — the only MCP dependency in the **default** build).
+  The `-webmvc` starter is permitted **only** inside the opt-in `http` Maven profile
+  (`mvn -Phttp`); it must never be added to the top-level `<dependencies>`. The
+  `-webflux` variant is not used at all. See "The opt-in `http` profile" below.
 - MCP Java SDK: `io.modelcontextprotocol.sdk:mcp` **0.18.3** (transitive via the
   starter — never declared directly)
 - Java: **21**
@@ -52,6 +55,30 @@ This is the **canonical backport template** for this repo:
 > fix or, as here, an API the SDK requires), add or adjust a one-line
 > `dependencyManagement` entry for that single `groupId:artifactId`. Do **not**
 > bump the parent, the Spring AI BOM, or the MCP SDK to drag it along.
+
+## The opt-in `http` profile (webmvc is profile-confined)
+
+The default build is **pure core stdio** — no web server on the classpath. The
+opt-in remote-MCP / HTTP transport is added **only** under the `http` Maven
+profile, which is the clean seam that keeps the default build byte-behavior-identical:
+
+- `mvn -Phttp package` adds `org.springframework.ai:spring-ai-starter-mcp-server-webmvc`
+  (version **managed by the spring-ai-bom 1.1.8** — do **not** declare a version),
+  which transitively pulls `spring-boot-starter-web` (embedded Tomcat), the SDK's
+  `io.modelcontextprotocol.sdk:mcp-spring-webmvc` transport (sibling of the core
+  `mcp` 0.18.3 — also never declared directly), and `spring-webmvc`.
+- The profile attaches a distinct **`http`-classified** artifact
+  (`target/opendota-mcp-1.2.0-http.jar`) via the spring-boot-maven-plugin
+  `<classifier>http</classifier>`, so the plain unclassified jar stays web-free.
+- The http-only sources live in `src/http/java` and are compiled **only** under the
+  profile (added via `build-helper-maven-plugin` 3.6.1).
+- The json-schema-validator **2.0.0** forward-pin in root `dependencyManagement`
+  applies to this profile too (profiles inherit the project's dependency management);
+  the webmvc path still uses `mcp-json-jackson2`, so the pin must remain.
+
+Verify both builds after any change here: `mvn clean verify` (default — must show
+**no** webmvc/tomcat in `dependency:tree`) and `mvn -Phttp clean verify` (the http
+artifact must build).
 
 ## Security-patch intake process
 
@@ -102,7 +129,12 @@ These constraints are locked (see `CLAUDE.md`); a CVE response must respect them
 - Never remove the json-schema-validator 2.0.0 override.
 - `spring-boot-maven-plugin` only — no maven-shade or any other fat-jar
   mechanism.
-- Never declare the MCP SDK directly, and never bump it to 2.0.0.
+- Never declare the MCP SDK directly, and never bump it to 2.0.0. This includes the
+  webmvc-transport sibling `io.modelcontextprotocol.sdk:mcp-spring-webmvc`, which
+  arrives transitively via the `-webmvc` starter under the `http` profile.
+- Never add `spring-ai-starter-mcp-server-webmvc` (or any embedded web server) to the
+  top-level `<dependencies>`. It is permitted **only** inside the `http` Maven profile;
+  `-webflux` is not used at all. The default build must stay web-free.
 - The sidecar is a standalone build with **no parent** and JDK-only runtime; do
   not introduce a reactor parent to "unify" dependency management. Each build
   applies this same single-transitive-pin policy independently.
