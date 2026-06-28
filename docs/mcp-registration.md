@@ -189,6 +189,32 @@ owns the single rate limiter and a shared cache, and have each server forward to
 > sidecar's key. Enabling `opendota.write-tools-enabled=true` on the agent together with
 > `opendota.sidecar-enabled=true` is supported.
 
+## Remote MCP server (custom connector over HTTP)
+
+The default jar speaks **stdio** only, which a client launches as a subprocess. To
+add the server through Claude's **"Add custom connector → Remote MCP server URL"**
+dialog instead, build the **opt-in HTTP** variant and run it behind a TLS proxy.
+This is a separate, opt-in build — the default stdio jar above is unchanged.
+
+```sh
+mvn -Phttp clean package
+# -> target/opendota-mcp-1.2.0-http.jar  (the plain stdio jar is still produced too)
+```
+
+Run it in http mode (loopback, bearer-gated), pointed at the shared sidecar:
+
+```sh
+SPRING_PROFILES_ACTIVE=http OPENDOTA_HTTP_BEARER_TOKEN=<secret> \
+  java -jar target/opendota-mcp-1.2.0-http.jar
+# binds 127.0.0.1:8080, Streamable-HTTP MCP endpoint at /mcp
+```
+
+Then put a TLS proxy / tunnel (Cloudflare Tunnel, Caddy, nginx) in front to present
+a public `https://…/mcp` URL, and paste that URL into the custom-connector dialog
+(select **Streamable HTTP**). Full instructions — endpoint, auth, the fail-closed
+bind guard, and the TLS-proxy setup — are in
+[`docs/remote-connector.md`](remote-connector.md).
+
 ## Running the server directly
 
 You can also launch the jar yourself, for example to smoke-test it before
