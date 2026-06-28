@@ -17,15 +17,17 @@ services:
   mcp-http:
     build:
       context: .
-      # The root Dockerfile must build the -Phttp jar for this service. If your Dockerfile
-      # takes a profile build-arg, set it here; otherwise point `dockerfile`/target at the
-      # http build. Adjust to match the repo's Dockerfile.
+      # The root Dockerfile honors this arg: MAVEN_PROFILE=http builds with -Phttp and copies
+      # the runnable '-http' classified jar into the image (an empty/unset arg builds stdio).
       args:
         MAVEN_PROFILE: http
     image: opendota-mcp-http:1.2.0
     init: true
     depends_on:
-      - sidecar
+      # Wait for the sidecar to be HEALTHY (it has a healthcheck), not just started, so the
+      # first forwarded /api call doesn't race the sidecar's startup.
+      sidecar:
+        condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: "http"
       # Bind all interfaces INSIDE the container so the published port (loopback-only below)
@@ -49,6 +51,13 @@ services:
       # Container peers on the `opendota` network reach :8080 directly, which is why the
       # bearer token is required.
       - "127.0.0.1:8080:8080"
+    healthcheck:
+      # Probe the un-gated actuator health endpoint (curl ships in the jammy base image).
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/actuator/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 25s
+      retries: 3
     networks:
       - opendota
     restart: unless-stopped

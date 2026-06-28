@@ -14,11 +14,19 @@ FROM maven:3.9-eclipse-temurin-21 AS builder
 WORKDIR /build
 COPY pom.xml .
 COPY src ./src
+# Optional Maven profile. Default (empty) builds the pure-stdio jar. Pass MAVEN_PROFILE=http
+# (see docker-compose.http.yml) to build the opt-in HTTP transport: that adds the webmvc starter
+# and produces target/opendota-mcp-<ver>-http.jar — which is what must run for the http mode.
+ARG MAVEN_PROFILE=
 # Persistent BuildKit cache for the local Maven repo — faster and more reliable than
 # dependency:go-offline, which under-resolves the Spring AI BOM + plugin set here. Rename the
-# built jar to a stable name so the steps below don't hardcode the project version.
-RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests \
-    && cp target/opendota-mcp-*.jar app.jar
+# built jar to a stable name so the steps below don't hardcode the project version. Under -Phttp
+# the runnable artifact is the '-http' classified jar (the plain jar is a thin non-runnable jar),
+# so prefer it when present.
+RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests ${MAVEN_PROFILE:+-P${MAVEN_PROFILE}} \
+    && { ls target/opendota-mcp-*-http.jar >/dev/null 2>&1 \
+         && cp target/opendota-mcp-*-http.jar app.jar \
+         || cp target/opendota-mcp-*.jar app.jar; }
 # Split the Spring Boot jar into layers with the (non-deprecated) tools jarmode.
 # --launcher yields the exploded layout that JarLauncher runs.
 RUN java -Djarmode=tools -jar app.jar extract --layers --launcher --destination extracted
