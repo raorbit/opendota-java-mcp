@@ -16,8 +16,8 @@ instead of being launched locally over stdio.
 Claude (Anthropic cloud)
         │  https://opendota.example.com/mcp   (public, CA-trusted TLS)
         ▼
-  TLS proxy / tunnel  (Cloudflare Tunnel / Caddy / nginx)   ← terminates TLS,
-        │  http://127.0.0.1:8080/mcp                          injects Bearer token
+  TLS proxy / tunnel  (Cloudflare Tunnel + Access / Caddy)   ← terminates TLS,
+        │  http://127.0.0.1:8080/mcp                          authenticates the caller
         ▼
   opendota-mcp (http profile)  ── opendota.sidecar-enabled=true ──▶  sidecar
         │  Streamable-HTTP MCP endpoint /mcp                          (API key,
@@ -95,8 +95,9 @@ All are standard `opendota.*` / Spring properties; supply them via env
 - **Bearer.** When `opendota.http.auth-mode=bearer` (the default), every request to
   `/mcp` must carry `Authorization: Bearer <token>` matching `opendota.http.bearer-token`.
   The comparison is constant-time (`MessageDigest.isEqual`). A missing/wrong token
-  gets `401` with `WWW-Authenticate: Bearer`. Liveness paths (`/health`,
-  `/actuator/health`) are left **un-gated** so a proxy/tunnel can probe.
+  gets `401` with `WWW-Authenticate: Bearer`. The actuator liveness endpoint
+  (`/actuator/health`, served by `spring-boot-starter-actuator` under `-Phttp`) is
+  left **un-gated** so a proxy/tunnel can probe; nothing else is exempt.
 - **Fail-closed bind guard.** On startup, if the server binds a **non-loopback**
   address (e.g. `server.address=0.0.0.0`, or unset → all interfaces) **without** a
   bearer token, it logs a SEVERE message and **refuses to start** (`System.exit(1)`)
@@ -107,45 +108,74 @@ All are standard `opendota.*` / Spring properties; supply them via env
   The recommended shape is to **bind loopback** (`127.0.0.1`) and let the TLS proxy
   forward to it, rather than binding a public interface directly.
 
-## 3. Put a TLS proxy / tunnel in front
+## 3. Put a TLS proxy / tunnel in front — and authenticate the public hop
 
 Claude connects from **Anthropic's cloud**, not from your localhost, so the endpoint
 must be a **public `https://` URL with a real CA-trusted certificate** — a bare local
 HTTP port or a self-signed cert will not work. **TLS is terminated by an external
 proxy/tunnel; it is never implemented in the JVM.**
 
-### Cloudflare Tunnel (no inbound port, no public IP needed)
+> **Read this first — how the public endpoint actually gets authenticated.**
+> Claude's consumer **"Add custom connector"** dialog authenticates with **OAuth**
+> (the Client ID / Secret fields); it **cannot send a static bearer token**. So the
+> in-JVM `OPENDOTA_HTTP_BEARER_TOKEN` does **not** authenticate the dialog connector —
+> it authenticates **programmatic** MCP clients (Messages API / code that sets the
+> header) and serves as a defense-in-depth check on the proxy→app hop.
+>
+> Therefore **the public hop must be authenticated by an OAuth/identity layer at the
+> proxy** (Cloudflare Access is the easy path), *not* by the bearer. The two failure
+> modes to avoid:
+> - **Injecting a fixed bearer for every public request** (e.g. Caddy `header_up
+>   Authorization`) authenticates *nobody* on the public side — it makes `/mcp`
+>   usable by anyone who knows the URL. Only do this *behind* a real access layer.
+> - **Running bearer mode with nothing supplying the header** makes the dialog
+>   connector get a `401` (it has no bearer field). Pair bearer mode with a header
+>   injector, or use `auth-mode=none` behind an access-controlled proxy.
+
+### Recommended: Cloudflare Tunnel + Cloudflare Access
 
 ```sh
-# After `cloudflared tunnel login` and creating a tunnel:
-cloudflared tunnel --url http://127.0.0.1:8080
-# or, with a named tunnel + DNS route, expose https://opendota.example.com -> 127.0.0.1:8080
+# After `cloudflared tunnel login` and creating a named tunnel with a DNS route:
+#   https://opendota.example.com  ->  http://127.0.0.1:8080
+cloudflared tunnel run <tunnel-name>
 ```
 
-Cloudflare presents the public `https://…` hostname and forwards to the loopback app.
+Then add a **Cloudflare Access** policy on `opendota.example.com` (Zero Trust →
+Access → Applications) so only your identity/SSO can reach it. Access enforces auth at
+the edge; only approved requests are forwarded to the loopback app. Because the app is
+loopback-only and reachable solely through the authenticated tunnel, run it with
+`opendota.http.auth-mode=none` (the loopback bind satisfies the fail-closed guard), or
+keep `auth-mode=bearer` and have Access/cloudflared inject the matching header.
 
-### Caddy (automatic Let's Encrypt TLS)
+> A bare `cloudflared tunnel --url http://127.0.0.1:8080` with **no** Access policy is
+> an **open** endpoint — anyone with the URL reaches `/mcp`. Always add the Access
+> policy (or another auth layer) before exposing it.
+
+### Caddy (automatic Let's Encrypt TLS) — add a real auth layer
+
+Caddy gets the CA cert for you, but you **must** add public-side authentication; the
+connector dialog can't send a bearer, so reverse-proxying with a bare injected bearer
+would leave `/mcp` open. Put an auth layer in front — e.g. `forward_auth` to an
+OAuth/OIDC provider, or `basic_auth` for a private/programmatic setup — and only then
+optionally inject the upstream bearer for defense in depth:
 
 ```caddyfile
 opendota.example.com {
+    # Public auth (pick one): OIDC/OAuth via forward_auth, or basic_auth, etc.
+    forward_auth auth-provider:9091 {
+        uri /api/verify
+        copy_headers Remote-User
+    }
     reverse_proxy 127.0.0.1:8080 {
-        # Inject the app-level bearer so the JVM filter passes (defense in depth).
-        header_up Authorization "Bearer <secret>"
+        # Optional defense-in-depth: satisfy the app's bearer filter on the internal hop.
+        header_up Authorization "Bearer {env.OPENDOTA_HTTP_BEARER_TOKEN}"
     }
 }
 ```
 
-Caddy obtains and renews the certificate automatically and reverse-proxies `/mcp`
-(and `/health`) to the loopback app.
-
-> **A note on the in-app OAuth flow.** Claude's consumer "Add custom connector"
-> dialog drives an **OAuth** authorize/redirect; it does **not** let the user type a
-> static bearer token. So the bearer `Filter` here is the auth for the Messages-API /
-> programmatic path and a **defense-in-depth** check behind the proxy. The clean,
-> low-effort setup is to terminate TLS and do the OAuth at the fronting proxy/tunnel
-> (Cloudflare Access / Caddy), and have the proxy **inject** the
-> `Authorization: Bearer <token>` header upstream; the Java filter then enforces it.
-> Full OAuth 2.1 / dynamic client registration in the JVM is out of scope.
+Caddy renews the certificate automatically and reverse-proxies `/mcp` (and
+`/actuator/health`) to the loopback app. **Do not** ship the bare `header_up`-only
+config from earlier drafts as your public auth — it authenticates no one.
 
 ## 4. Add it in Claude
 
