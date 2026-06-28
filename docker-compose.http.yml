@@ -1,0 +1,60 @@
+# OPTIONAL, OFF BY DEFAULT. Runs the OpenDota MCP server in the opt-in HTTP (remote-MCP)
+# mode, pointed at the shared sidecar. This is a SEPARATE compose file so it never disturbs
+# the base docker-compose.yml (the sidecar service): use it only when you explicitly want
+# the HTTP transport, by passing BOTH files, e.g.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.http.yml up
+#
+# It builds the -Phttp jar inside the image (see the root Dockerfile's `http` build arg /
+# stage if present, or override the build args below to your http build). TLS is NOT handled
+# here — put a proxy/tunnel (Cloudflare Tunnel / Caddy) in front and have it inject the
+# Authorization: Bearer header. See docs/remote-connector.md.
+#
+# Requires the sidecar service from docker-compose.yml (same `opendota` network) and a .env
+# holding OPENDOTA_HTTP_BEARER_TOKEN (+ the sidecar's OPENDOTA_SIDECAR_TOKEN / OPENDOTA_API_KEY).
+
+services:
+  mcp-http:
+    build:
+      context: .
+      # The root Dockerfile must build the -Phttp jar for this service. If your Dockerfile
+      # takes a profile build-arg, set it here; otherwise point `dockerfile`/target at the
+      # http build. Adjust to match the repo's Dockerfile.
+      args:
+        MAVEN_PROFILE: http
+    image: opendota-mcp-http:1.2.0
+    init: true
+    depends_on:
+      - sidecar
+    environment:
+      SPRING_PROFILES_ACTIVE: "http"
+      # Bind all interfaces INSIDE the container so the published port (loopback-only below)
+      # and any TLS proxy can reach it. The fail-closed guard REQUIRES a bearer token for a
+      # non-loopback bind, which is enforced by OPENDOTA_HTTP_BEARER_TOKEN being required here.
+      SERVER_ADDRESS: "0.0.0.0"
+      SERVER_PORT: "8080"
+      # REQUIRED: the bind above is non-loopback, so without a token the app refuses to start
+      # (fail-closed guard). `docker compose up`/`config` fails fast if it is unset or empty.
+      OPENDOTA_HTTP_BEARER_TOKEN: "${OPENDOTA_HTTP_BEARER_TOKEN:?set OPENDOTA_HTTP_BEARER_TOKEN in .env — see docs/remote-connector.md}"
+      OPENDOTA_HTTP_AUTH_MODE: "bearer"
+      # Route through the shared sidecar (same network, default port). The sidecar holds the
+      # API key and owns the one rate limiter / cache / L2 / watched archive.
+      OPENDOTA_SIDECAR_ENABLED: "true"
+      OPENDOTA_SIDECAR_HOST: "sidecar"
+      OPENDOTA_SIDECAR_PORT: "31337"
+      # Must match the sidecar's token (it gates /api). Forwarded from .env.
+      OPENDOTA_SIDECAR_TOKEN: "${OPENDOTA_SIDECAR_TOKEN:?set OPENDOTA_SIDECAR_TOKEN in .env — see .env.example}"
+    ports:
+      # Host-facing exposure is loopback-only; put your TLS proxy/tunnel in front of this.
+      # Container peers on the `opendota` network reach :8080 directly, which is why the
+      # bearer token is required.
+      - "127.0.0.1:8080:8080"
+    networks:
+      - opendota
+    restart: unless-stopped
+
+networks:
+  # Reuse the dedicated network defined in docker-compose.yml so this service can reach the
+  # sidecar. Declared external:false here is implied by the merge — both files define it.
+  opendota:
+    driver: bridge
