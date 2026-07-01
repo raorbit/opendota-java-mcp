@@ -121,6 +121,29 @@ class TtlCacheTest {
     }
 
     @Test
+    void byteBudgetEvictsMultipleNearestToExpiryEntriesInOrder() {
+        // One large body forcing several evictions at once — the multi-eviction path. Five 10-byte
+        // entries with ascending TTLs fill a 50-byte budget; a 30-byte body then evicts the three
+        // nearest to expiry (e1,e2,e3), leaving the two furthest (e4,e5) plus the newcomer, at budget.
+        TtlCache cache = new TtlCache(10_000, 50);
+        cache.put("e1", "0123456789", Duration.ofSeconds(10));
+        cache.put("e2", "0123456789", Duration.ofSeconds(20));
+        cache.put("e3", "0123456789", Duration.ofSeconds(30));
+        cache.put("e4", "0123456789", Duration.ofSeconds(40));
+        cache.put("e5", "0123456789", Duration.ofSeconds(50));   // 50 bytes total, at budget
+
+        cache.put("big", "012345678901234567890123456789", Duration.ofSeconds(60));   // 30 bytes -> 80 > 50
+
+        assertThat(cache.get("e1")).isNull();
+        assertThat(cache.get("e2")).isNull();
+        assertThat(cache.get("e3")).isNull();
+        assertThat(cache.get("e4")).isEqualTo("0123456789");
+        assertThat(cache.get("e5")).isEqualTo("0123456789");
+        assertThat(cache.get("big")).isEqualTo("012345678901234567890123456789");
+        assertThat(cache.approximateBytes()).isLessThanOrEqualTo(50);
+    }
+
+    @Test
     void valueLargerThanByteBudgetIsNotCached() {
         TtlCache cache = new TtlCache(10_000, 5);
         // A single value bigger than the whole budget cannot be cached at all.
