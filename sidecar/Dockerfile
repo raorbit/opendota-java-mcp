@@ -6,7 +6,9 @@
 # root is enforced in CI, so the image build skips tests.
 
 # ---- build stage ----
-FROM maven:3.9-eclipse-temurin-21 AS builder
+# Base images pinned by multi-arch manifest digest for reproducible builds (tag kept for
+# readability). Refresh with: docker buildx imagetools inspect <image:tag>
+FROM maven:3.9-eclipse-temurin-21@sha256:d7e7f57407437c014571f1ad5a9955f03fc3edcb1d964067ef351fa38e798665 AS builder
 WORKDIR /build
 COPY pom.xml .
 COPY src ./src
@@ -14,7 +16,7 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests \
     && cp target/opendota-sidecar-*.jar app.jar
 
 # ---- runtime stage ----
-FROM eclipse-temurin:21-jre-jammy
+FROM eclipse-temurin:21-jre-jammy@sha256:199aebeb3adcde4910695cdebfe782ada38dadb6cc8013159b58d3724451befd
 # Fixed UID/GID + a pre-created, owned /data BEFORE the volume is declared: on first mount
 # of an empty named volume, Docker copies this ownership onto it, so the non-root user can
 # write the SQLite L2 cache (l2-cache.db + -wal/-shm). curl already ships in this base image.
