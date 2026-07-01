@@ -134,6 +134,21 @@ class OpenDotaClientTest {
     }
 
     @Test
+    void upstreamRateLimitIsRetriedThenSucceeds() throws Exception {
+        // An upstream 429 is the canonical "back off and retry" signal, so a direct GET retries it
+        // (unlike a 404). Return 429 twice, then succeed. (No Retry-After header -> exponential backoff.)
+        AtomicInteger hits = new AtomicInteger();
+        server.createContext("/api/players/429", exchange ->
+                respond(exchange, hits.incrementAndGet() < 3 ? 429 : 200,
+                        hits.get() < 3 ? "{\"error\":\"rate limited\"}" : "{\"ok\":true}"));
+
+        OpenDotaClient client = new OpenDotaClient(null, base);
+
+        assertThat(client.getJson("/players/429")).isEqualTo("{\"ok\":true}");
+        assertThat(hits.get()).isEqualTo(3);   // first try + 2 retries
+    }
+
+    @Test
     void persistentServerErrorIsSurfacedAfterBoundedRetries() throws Exception {
         // /live is no-store, so each call reaches upstream. A persistent 5xx is retried up to the
         // bound and then surfaced — not retried forever.

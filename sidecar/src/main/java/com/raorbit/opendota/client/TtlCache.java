@@ -2,6 +2,8 @@ package com.raorbit.opendota.client;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -141,23 +143,21 @@ public final class TtlCache {
                 removeEntry(e.getKey(), e.getValue());
             }
         }
-        while (map.size() > maxEntries || currentBytes.get() > maxBytes) {
-            String nearestKey = null;
-            Entry nearestEntry = null;
-            long nearestExpiry = 0L;
-            for (Map.Entry<String, Entry> e : map.entrySet()) {
-                long exp = e.getValue().expiresAtNanos;
-                // Overflow-safe "expires before", consistent with get()'s comparison.
-                if (nearestKey == null || exp - nearestExpiry < 0L) {
-                    nearestExpiry = exp;
-                    nearestKey = e.getKey();
-                    nearestEntry = e.getValue();
-                }
-            }
-            if (nearestKey == null) {
+        if (map.size() <= maxEntries && currentBytes.get() <= maxBytes) {
+            return;
+        }
+        // Still over a bound: drop live entries nearest to expiry. Snapshot the entries and sort by
+        // expiry ONCE (O(n log n)) instead of rescanning the whole map to find the single nearest entry
+        // per eviction — that was O(n^2) when one large body forces dropping many small entries. All
+        // cached expiries fall within a small window (TTLs are seconds-to-minutes), so ordering by the
+        // raw nanoTime stamp agrees with get()/put()'s overflow-safe local comparison in practice.
+        List<Map.Entry<String, Entry>> byExpiry = new ArrayList<>(map.entrySet());
+        byExpiry.sort((a, b) -> Long.compare(a.getValue().expiresAtNanos, b.getValue().expiresAtNanos));
+        for (Map.Entry<String, Entry> e : byExpiry) {
+            if (map.size() <= maxEntries && currentBytes.get() <= maxBytes) {
                 break;
             }
-            removeEntry(nearestKey, nearestEntry);
+            removeEntry(e.getKey(), e.getValue());
         }
     }
 

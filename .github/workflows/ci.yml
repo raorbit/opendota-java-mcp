@@ -39,6 +39,22 @@ jobs:
       - name: Build and test
         run: mvn -B -f sidecar/pom.xml clean verify
 
+  http:
+    name: HTTP profile (opendota-mcp -Phttp)
+    runs-on: ubuntu-latest
+    # The opt-in HTTP transport lives in src/http/java (compiled only under -Phttp) and holds the
+    # security-critical BearerAuthFilter + fail-closed startup guard. The default `verify` never
+    # touches that source root, so build + test it explicitly here — see docs/dependency-policy.md.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and test the http profile
+        run: mvn -B -Phttp clean verify
+
   dependency-updates:
     name: Dependency updates (informational)
     runs-on: ubuntu-latest
@@ -56,3 +72,5 @@ jobs:
         run: mvn -B versions:display-dependency-updates
       - name: Report sidecar dependency updates
         run: mvn -B -f sidecar/pom.xml versions:display-dependency-updates
+      - name: Report http-profile dependency updates
+        run: mvn -B -Phttp versions:display-dependency-updates

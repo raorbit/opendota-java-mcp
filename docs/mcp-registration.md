@@ -146,8 +146,12 @@ owns the single rate limiter and a shared cache, and have each server forward to
    > holds — read-only OpenDota calls under your key and the shared rate budget. On a host where
    > not every local user is trusted, require a shared secret: start the sidecar with
    > `OPENDOTA_SIDECAR_TOKEN=<secret>` and set `opendota.sidecar-token=<secret>` on each agent.
-   > `GET /api/*` then requires a matching `X-Sidecar-Token` header (constant-time compared);
-   > `GET /health` stays open. If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
+   > `GET /api/*` and `GET /stats` then require a matching `X-Sidecar-Token` header (constant-time
+   > compared); only `GET /health` stays open. The sidecar also forwards agents' **writes** (`POST
+   > /request`, `/refresh`) under its key; set `OPENDOTA_SIDECAR_ALLOW_WRITES=false` to reject those
+   > inbound writes with `403`. (The watched-player auto-parser writes on its own initiative and is
+   > governed separately — turn it off with `OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE=false` too for a
+   > fully write-free sidecar.) If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
    > and runs **keyless**, which caps all agents at the 60/min keyless limit.
 
    An optional **durable L2 cache** (disk-backed SQLite, off by default) lets the sidecar serve
@@ -198,7 +202,9 @@ This is a separate, opt-in build — the default stdio jar above is unchanged.
 
 ```sh
 mvn -Phttp clean package
-# -> target/opendota-mcp-1.2.0-http.jar  (the plain stdio jar is still produced too)
+# -> target/opendota-mcp-1.2.0-http.jar  (the runnable one; the unclassified
+#    opendota-mcp-1.2.0.jar this build leaves behind is a thin, non-executable jar —
+#    run a plain `mvn package` for a runnable stdio jar)
 ```
 
 Run it in http mode (loopback, bearer-gated), pointed at the shared sidecar:

@@ -53,6 +53,14 @@ public final class WatchedAutoParser implements AutoCloseable {
 
     /** Recent matches per watched player scanned on each poll (older replays have expired and can't parse). */
     private static final int POLL_MATCH_LIMIT = 100;
+    /**
+     * Upper bound on the dedup set so it can't grow without limit over the process lifetime. Successful
+     * requests are kept (never pruned on success), so a long-lived sidecar would otherwise accumulate one
+     * entry per watched match ever seen; once past this bound the set is cleared. A clear costs at most a
+     * duplicate parse request (idempotent upstream), never correctness, and the bound is far above any
+     * realistic count of parseable recent matches for a watched-player set.
+     */
+    private static final int MAX_REQUESTED_TRACKED = 100_000;
     /** Delay before the first poll, so the sidecar finishes starting before the first sweep. */
     private static final long INITIAL_POLL_DELAY_MILLIS = 15_000L;
 
@@ -65,7 +73,7 @@ public final class WatchedAutoParser implements AutoCloseable {
     private final OpenDotaClient client;
     private final Set<Long> watchedIds;
     private final long pollIntervalMillis;
-    /** Match ids already requested this process, so neither trigger asks twice. */
+    /** Match ids already requested this process, so neither trigger asks twice (bounded — see {@link #boundRequested}). */
     private final Set<Long> requested = ConcurrentHashMap.newKeySet();
 
     private final AtomicLong parseRequested = new AtomicLong();
@@ -103,6 +111,7 @@ public final class WatchedAutoParser implements AutoCloseable {
         if (!requested.add(matchId)) {
             return;   // already requested (or another thread is requesting it now)
         }
+        boundRequested();
         doParse(matchId);
     }
 
@@ -117,6 +126,7 @@ public final class WatchedAutoParser implements AutoCloseable {
         if (!requested.add(matchId)) {
             return;   // already requested (or another thread is requesting it now)
         }
+        boundRequested();
         try {
             parseExecutor.execute(() -> doParse(matchId));
         } catch (RejectedExecutionException e) {
@@ -132,6 +142,14 @@ public final class WatchedAutoParser implements AutoCloseable {
      * set on failure so the poll can retry. Runs on whichever thread {@link #requestParse} (caller/poll) or
      * {@link #requestParseAsync} (the parse executor) hands it. Never throws.
      */
+    /** Clear the dedup set if it has grown past {@link #MAX_REQUESTED_TRACKED}, bounding process-lifetime
+     *  memory. Rare enough that the worst case — a duplicate, idempotent parse request — is negligible. */
+    private void boundRequested() {
+        if (requested.size() > MAX_REQUESTED_TRACKED) {
+            requested.clear();
+        }
+    }
+
     private void doParse(long matchId) {
         try {
             client.postJson("/request/" + matchId);

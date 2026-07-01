@@ -63,7 +63,7 @@ public class HttpMcpConfig {
         //  2. Bearer mode explicitly requested but no secret set -> the filter would be a no-op
         //     (and now deny-all), so an operator asked for auth they don't actually have. Refuse
         //     regardless of bind address rather than silently running a broken auth layer.
-        if (exposed && (!bearerMode || !hasToken)) {
+        if (exposedWithoutAuth(exposed, bearerMode, hasToken)) {
             String shown = (bindHost == null || bindHost.isBlank()) ? "<all interfaces>" : bindHost;
             LOG.severe("refusing to start: HTTP MCP bind '" + shown + "' is not loopback but auth is "
                     + "not bearer-with-token, which would expose the /mcp endpoint unauthenticated. "
@@ -71,7 +71,7 @@ public class HttpMcpConfig {
                     + "server.address=127.0.0.1 behind a TLS proxy.");
             System.exit(1);
         }
-        if (bearerMode && !hasToken) {
+        if (bearerWithoutToken(bearerMode, hasToken)) {
             LOG.severe("refusing to start: opendota.http.auth-mode=bearer was requested but no "
                     + "bearer token is configured (OPENDOTA_HTTP_BEARER_TOKEN / "
                     + "opendota.http.bearer-token is blank). The bearer filter would have no secret "
@@ -99,7 +99,7 @@ public class HttpMcpConfig {
         return registration;
     }
 
-    private static boolean isNonLoopbackBind(String bindHost) {
+    static boolean isNonLoopbackBind(String bindHost) {
         if (bindHost == null || bindHost.isBlank()) {
             // Unset = bind all interfaces (0.0.0.0) = exposed.
             return true;
@@ -110,6 +110,22 @@ public class HttpMcpConfig {
             // Fail safe: an unresolvable host is treated as exposed.
             return true;
         }
+    }
+
+    /**
+     * Fail-closed condition 1, factored out of the {@link System#exit} call site so it is unit-testable:
+     * a non-loopback bind without bearer-with-token would expose the {@code /mcp} endpoint unauthenticated.
+     */
+    static boolean exposedWithoutAuth(boolean exposed, boolean bearerMode, boolean hasToken) {
+        return exposed && (!bearerMode || !hasToken);
+    }
+
+    /**
+     * Fail-closed condition 2, factored out of the {@link System#exit} call site so it is unit-testable:
+     * bearer mode was requested but no secret is configured, so the filter would have nothing to enforce.
+     */
+    static boolean bearerWithoutToken(boolean bearerMode, boolean hasToken) {
+        return bearerMode && !hasToken;
     }
 
     private static boolean isBlank(String s) {

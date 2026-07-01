@@ -128,6 +128,55 @@
 
     <profiles>
         <!--
+          Enforce the "default build stays web-free" invariant (see docs/dependency-policy.md and
+          CLAUDE.md): fail fast if any embedded web server / servlet stack leaks onto the DEFAULT
+          classpath, instead of relying on a human eyeballing `dependency:tree`. This profile is
+          activeByDefault, and Maven automatically DEACTIVATES activeByDefault profiles whenever an
+          explicit profile is activated — so it does NOT run under `-Phttp`, the one build that
+          legitimately pulls in webmvc + Tomcat.
+        -->
+        <profile>
+            <id>enforce-web-free</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-enforcer-plugin</artifactId>
+                        <version>3.5.0</version>
+                        <executions>
+                            <execution>
+                                <id>ban-web-server</id>
+                                <goals>
+                                    <goal>enforce</goal>
+                                </goals>
+                                <configuration>
+                                    <rules>
+                                        <bannedDependencies>
+                                            <excludes>
+                                                <exclude>org.springframework.boot:spring-boot-starter-web</exclude>
+                                                <exclude>org.springframework.boot:spring-boot-starter-webflux</exclude>
+                                                <exclude>org.springframework.boot:spring-boot-starter-tomcat</exclude>
+                                                <exclude>org.apache.tomcat.embed:*</exclude>
+                                                <exclude>org.springframework:spring-webmvc</exclude>
+                                                <exclude>org.springframework:spring-webflux</exclude>
+                                                <exclude>org.springframework.ai:spring-ai-starter-mcp-server-webmvc</exclude>
+                                                <exclude>org.springframework.ai:spring-ai-starter-mcp-server-webflux</exclude>
+                                            </excludes>
+                                            <message>The default (stdio) build must stay web-free: no embedded web server / servlet stack on the classpath. These belong ONLY in the -Phttp profile (see docs/dependency-policy.md).</message>
+                                        </bannedDependencies>
+                                    </rules>
+                                    <fail>true</fail>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!--
           Opt-in HTTP (remote-MCP) build. The DEFAULT build (no profile) stays pure
           stdio: the core spring-ai-starter-mcp-server brings NO web server, so the
           default jar is byte-behavior-identical to today.
@@ -178,6 +227,20 @@
                                 <configuration>
                                     <sources>
                                         <source>src/http/java</source>
+                                    </sources>
+                                </configuration>
+                            </execution>
+                            <!-- Tests for the http-only classes (BearerAuthFilter, HttpMcpConfig); like the
+                                 sources, they exist only under -Phttp so the default build never sees them. -->
+                            <execution>
+                                <id>add-http-test-source</id>
+                                <phase>generate-test-sources</phase>
+                                <goals>
+                                    <goal>add-test-source</goal>
+                                </goals>
+                                <configuration>
+                                    <sources>
+                                        <source>src/http/test/java</source>
                                     </sources>
                                 </configuration>
                             </execution>

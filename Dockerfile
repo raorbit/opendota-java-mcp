@@ -10,7 +10,10 @@
 # the key value (see docs/mcp-registration.md).
 
 # ---- build stage ----
-FROM maven:3.9-eclipse-temurin-21 AS builder
+# Base images are pinned by multi-arch manifest digest for reproducible, tamper-evident builds
+# (the tag is kept for readability). Refresh deliberately with:
+#   docker buildx imagetools inspect <image:tag>
+FROM maven:3.9-eclipse-temurin-21@sha256:d7e7f57407437c014571f1ad5a9955f03fc3edcb1d964067ef351fa38e798665 AS builder
 WORKDIR /build
 COPY pom.xml .
 COPY src ./src
@@ -32,7 +35,7 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests ${MAVEN
 RUN java -Djarmode=tools -jar app.jar extract --layers --launcher --destination extracted
 
 # ---- runtime stage ----
-FROM eclipse-temurin:21-jre-jammy
+FROM eclipse-temurin:21-jre-jammy@sha256:199aebeb3adcde4910695cdebfe782ada38dadb6cc8013159b58d3724451befd
 RUN groupadd -g 10001 app && useradd -u 10001 -g app -m app
 WORKDIR /app
 # Copy layers most- to least-stable so the dependency layers cache across rebuilds.

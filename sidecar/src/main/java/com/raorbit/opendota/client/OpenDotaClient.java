@@ -50,6 +50,8 @@ public class OpenDotaClient implements AutoCloseable {
     private static final Duration UPSTREAM_RETRY_BASE_BACKOFF = Duration.ofMillis(250);
     /** Maximum backoff between upstream retries. */
     private static final Duration UPSTREAM_RETRY_MAX_BACKOFF = Duration.ofSeconds(1);
+    /** Cap on how long an upstream {@code Retry-After} hint may make a retry wait, so a tool call can't hang. */
+    private static final Duration MAX_RETRY_AFTER_BACKOFF = Duration.ofSeconds(5);
     /** Default upper bound on time a request waits for a rate-limit permit. */
     private static final Duration DEFAULT_RATE_LIMIT_BUDGET = Duration.ofSeconds(10);
     /** Default maximum number of cached responses retained before eviction. */
@@ -465,9 +467,12 @@ public class OpenDotaClient implements AutoCloseable {
                     }
                     return body;
                 }
-                // Retry a transient server error (5xx) on a direct GET before surfacing it.
-                if (!forwarding && status >= 500 && status <= 599 && attempt < maxAttempts) {
-                    backoff = retryBackoff(backoff, path);
+                // Retry a transient server error (5xx) or an upstream rate-limit (429) on a direct GET
+                // before surfacing it. A 429 is the canonical "back off and retry" signal, so honor the
+                // server's Retry-After hint when present rather than the fixed exponential backoff.
+                if (!forwarding && attempt < maxAttempts && (status == 429 || (status >= 500 && status <= 599))) {
+                    backoff = status == 429 ? retryAfterBackoff(response, backoff, path)
+                                            : retryBackoff(backoff, path);
                     continue;
                 }
                 // Scrub the actual key value (raw and URL-encoded) first, so an upstream
@@ -484,8 +489,11 @@ public class OpenDotaClient implements AutoCloseable {
                     throw new OpenDotaException(0, path,
                             "upstream response exceeded " + maxResponseBytes + "-byte cap");
                 }
-                // Retry a transient transport failure (timeout/connect) on a direct, non-slow GET.
-                if (!forwarding && !slow && isTransientTransport(e) && attempt < maxAttempts) {
+                // Retry a transient transport failure on a direct GET. A refused/reset connection is
+                // unrelated to query duration, so it is retried even on the slow endpoints; a *timeout*
+                // is retried only on a normally-fast endpoint, since a slow endpoint's extended timeout
+                // is its resilience and re-issuing a genuinely-slow query just doubles the wait.
+                if (!forwarding && attempt < maxAttempts && isRetryableTransport(e, slow)) {
                     backoff = retryBackoff(backoff, path);
                     continue;
                 }
@@ -511,14 +519,22 @@ public class OpenDotaClient implements AutoCloseable {
         return p.startsWith("/search") || p.startsWith("/explorer") ? SLOW_REQUEST_TIMEOUT : REQUEST_TIMEOUT;
     }
 
-    /** True if {@code t} (or a cause) is a transient transport failure worth retrying an idempotent GET. */
-    private static boolean isTransientTransport(Throwable t) {
+    /**
+     * Whether a transport failure on an idempotent GET is worth retrying. A refused/reset connection
+     * ({@link ConnectException}) always is; a {@link HttpTimeoutException} only on a normally-fast
+     * endpoint ({@code !slow}) — a slow endpoint already carries the extended timeout as its resilience.
+     */
+    private static boolean isRetryableTransport(Throwable t, boolean slow) {
+        boolean timedOut = false;
         for (Throwable c = t; c != null; c = c.getCause()) {
-            if (c instanceof HttpTimeoutException || c instanceof ConnectException) {
+            if (c instanceof ConnectException) {
                 return true;
             }
+            if (c instanceof HttpTimeoutException) {
+                timedOut = true;
+            }
         }
-        return false;
+        return timedOut && !slow;
     }
 
     /** Sleep the current backoff (interrupt-aware), returning the next (doubled, capped) backoff. */
@@ -531,6 +547,39 @@ public class OpenDotaClient implements AutoCloseable {
         }
         Duration next = backoff.multipliedBy(2);
         return next.compareTo(UPSTREAM_RETRY_MAX_BACKOFF) > 0 ? UPSTREAM_RETRY_MAX_BACKOFF : next;
+    }
+
+    /**
+     * Backoff after an upstream {@code 429}: sleep the server's {@code Retry-After} hint (delta-seconds
+     * form, capped by {@link #MAX_RETRY_AFTER_BACKOFF}) when present and numeric, else fall back to the
+     * standard exponential {@link #retryBackoff}. Returns the next backoff for any subsequent retry.
+     */
+    private Duration retryAfterBackoff(HttpResponse<String> response, Duration backoff, String path)
+            throws OpenDotaException {
+        Duration hint = response.headers().firstValue("Retry-After")
+                .map(OpenDotaClient::parseRetryAfterSeconds)
+                .orElse(null);
+        if (hint == null) {
+            return retryBackoff(backoff, path);
+        }
+        Duration wait = hint.compareTo(MAX_RETRY_AFTER_BACKOFF) > 0 ? MAX_RETRY_AFTER_BACKOFF : hint;
+        try {
+            Thread.sleep(wait.toMillis());
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new OpenDotaException(0, path, "request interrupted", ie);
+        }
+        return backoff;   // leave the exponential schedule unchanged for any further retry
+    }
+
+    /** A {@code Retry-After} delta-seconds value as a Duration; null for missing/negative/non-numeric (HTTP-date). */
+    private static Duration parseRetryAfterSeconds(String value) {
+        try {
+            long seconds = Long.parseLong(value.trim());
+            return seconds >= 0 ? Duration.ofSeconds(seconds) : null;
+        } catch (NumberFormatException notDeltaSeconds) {
+            return null;   // HTTP-date form is not honored; caller falls back to exponential backoff
+        }
     }
 
     /**

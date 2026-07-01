@@ -63,9 +63,10 @@ public class LogRetentionCleaner implements ApplicationRunner {
 
     /**
      * Delete per-PID log files in {@code dir} older than {@code cutoff}, keeping the current PID's file
-     * and any name that doesn't match the {@code <prefix>-<pid>.log} shape (e.g. a legacy
-     * {@code opendota-mcp.log}). Returns the number deleted. Package-private + static so it's unit-testable
-     * against a temp dir without booting Spring.
+     * and any name that doesn't match the {@code <prefix>-<numeric-pid>.log} shape — both a legacy
+     * {@code opendota-mcp.log} (no PID segment) and a hand-renamed {@code opendota-mcp-backup.log}
+     * (non-numeric segment) are left alone. Returns the number deleted. Package-private + static so it's
+     * unit-testable against a temp dir without booting Spring.
      */
     static int purge(Path dir, String templateFileName, String currentPid, Instant cutoff) {
         int dash = templateFileName.lastIndexOf('-');
@@ -86,6 +87,12 @@ public class LogRetentionCleaner implements ApplicationRunner {
                 if (pid.equals(currentPid)) {
                     continue;   // never delete our own live log
                 }
+                if (!isPid(pid)) {
+                    // Only files that genuinely follow the "<prefix>-<numeric-pid><ext>" shape this app
+                    // writes are ours to delete; a hand-renamed file like "opendota-mcp-backup.log" that
+                    // merely fits the glob is left alone rather than silently purged.
+                    continue;
+                }
                 try {
                     if (Files.getLastModifiedTime(p).toInstant().isBefore(cutoff)) {
                         Files.deleteIfExists(p);
@@ -99,5 +106,21 @@ public class LogRetentionCleaner implements ApplicationRunner {
             log.debug("could not list log directory {}", dir, e);
         }
         return deleted;
+    }
+
+    /** True only for a non-empty ASCII-digits token, i.e. a real PID segment this app writes. Uses an
+     *  explicit ASCII range rather than {@link Character#isDigit}, which also accepts non-ASCII Unicode
+     *  digits (Arabic-Indic, fullwidth, …) that this app never emits and must not treat as a PID. */
+    private static boolean isPid(String token) {
+        if (token.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 }

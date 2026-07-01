@@ -26,6 +26,9 @@ class SidecarMainTest {
     private static final String BIND_DASHED = "opendota.sidecar-bind";
     private static final String DEFAULT_BIND_HOST = "127.0.0.1";
 
+    private static final String WRITES_DOTTED = "opendota.sidecar.allow-writes";
+    private static final String WRITES_DASHED = "opendota.sidecar-allow-writes";
+
     @BeforeEach
     @AfterEach
     void clearProperties() {
@@ -35,6 +38,8 @@ class SidecarMainTest {
         System.clearProperty(TOKEN_DASHED);
         System.clearProperty(BIND_DOTTED);
         System.clearProperty(BIND_DASHED);
+        System.clearProperty(WRITES_DOTTED);
+        System.clearProperty(WRITES_DASHED);
     }
 
     @Test
@@ -131,6 +136,32 @@ class SidecarMainTest {
     void requiresTokenIsTrueForNonLoopbackBinds() {
         assertThat(SidecarMain.requiresToken("0.0.0.0")).isTrue();
         assertThat(SidecarMain.requiresToken("10.0.0.5")).isTrue();
+    }
+
+    @Test
+    void resolveAllowWritesDefaultsToTrueWhenUnset() {
+        assumeTrue(System.getenv("OPENDOTA_SIDECAR_ALLOW_WRITES") == null);
+        assertThat(SidecarMain.resolveAllowWrites()).isTrue();
+    }
+
+    @Test
+    void resolveAllowWritesTreatsExplicitFalseyValuesAsReadOnly() {
+        for (String falsey : new String[] {"false", "FALSE", "0", "no", "off", "  false  "}) {
+            System.setProperty(WRITES_DOTTED, falsey);
+            assertThat(SidecarMain.resolveAllowWrites())
+                    .as("'%s' should disable writes", falsey)
+                    .isFalse();
+        }
+    }
+
+    @Test
+    void resolveAllowWritesKeepsWritesOnForTrueOrOtherValues() {
+        for (String truthy : new String[] {"true", "TRUE", "yes", "1", "anything"}) {
+            System.setProperty(WRITES_DOTTED, truthy);
+            assertThat(SidecarMain.resolveAllowWrites())
+                    .as("'%s' should keep writes on", truthy)
+                    .isTrue();
+        }
     }
 
     @Test

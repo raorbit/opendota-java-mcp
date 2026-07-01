@@ -48,7 +48,9 @@ distinct `http`-classified jar:
 
 ```sh
 mvn -Phttp clean package
-# -> target/opendota-mcp-1.2.0-http.jar   (and the plain stdio jar alongside it)
+# -> target/opendota-mcp-1.2.0-http.jar   (the runnable http jar)
+# The unclassified opendota-mcp-1.2.0.jar this build leaves behind is a thin,
+# non-executable jar (no launcher) — for a runnable stdio jar, run a plain `mvn package`.
 ```
 
 The first `-Phttp` build downloads `spring-ai-starter-mcp-server-webmvc` and
@@ -204,6 +206,10 @@ to sit behind your own TLS proxy/tunnel.
   you bound a non-loopback address without a token. Set
   `OPENDOTA_HTTP_BEARER_TOKEN` (and `opendota.http.auth-mode=bearer`), or bind
   `server.address=127.0.0.1`.
+- **Refuses to start, "auth-mode=bearer was requested but no bearer token is
+  configured":** the default `auth-mode=bearer` needs a token even on a loopback
+  bind. Set `OPENDOTA_HTTP_BEARER_TOKEN`, or set `opendota.http.auth-mode=none`
+  for an explicitly unauthenticated loopback-only instance.
 - **`401` on every call:** the `Authorization: Bearer <token>` header is missing or
   does not match `opendota.http.bearer-token`. If a proxy injects it, confirm the
   proxy and the app use the same secret.

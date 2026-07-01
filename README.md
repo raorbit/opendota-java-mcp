@@ -272,7 +272,9 @@ variables, JVM `-D` flags, or an external `application.properties`):
 | Property | Default | Meaning |
 | --- | --- | --- |
 | `opendota.cache-max-entries` | `4096` | Max cached responses retained before the nearest-to-expiry entry is evicted. |
+| `opendota.cache-max-bytes` | `67108864` (64 MB) | Approximate max total bytes of cached response bodies before eviction (heap bound); independent of the entry count. |
 | `opendota.rate-limit-budget` | `10s` | Max time a request waits for a rate-limit permit before returning a rate-limited error. |
+| `opendota.max-response-bytes` | `16777216` (16 MB) | Max bytes of a single upstream response body; larger responses are aborted, not buffered. |
 | `opendota.rate-limit-permits-per-minute` | `0` | Outbound permits/minute (`0` = tier default: 300 keyed / 60 keyless). When several server processes share one API key, set this to `tier_budget / process_count` so their combined rate stays within OpenDota's real per-key ceiling. |
 | `opendota.log-retention-days` | `7` | Days of per-process `opendota-mcp-<pid>.log` files to keep; older orphaned files are purged on startup (the current process's file is always kept). |
 | `OPENDOTA_LOG_DIR` (env var) | `~/.opendota-mcp/logs` | Directory for the per-process log files. Absolute by default (so logs never land in the client's working directory); override to relocate them. |
