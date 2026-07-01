@@ -230,6 +230,20 @@
                                     </sources>
                                 </configuration>
                             </execution>
+                            <!-- Tests for the http-only classes (BearerAuthFilter, HttpMcpConfig); like the
+                                 sources, they exist only under -Phttp so the default build never sees them. -->
+                            <execution>
+                                <id>add-http-test-source</id>
+                                <phase>generate-test-sources</phase>
+                                <goals>
+                                    <goal>add-test-source</goal>
+                                </goals>
+                                <configuration>
+                                    <sources>
+                                        <source>src/http/test/java</source>
+                                    </sources>
+                                </configuration>
+                            </execution>
                         </executions>
                     </plugin>
                     <plugin>
