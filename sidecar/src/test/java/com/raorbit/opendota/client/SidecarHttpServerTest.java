@@ -241,6 +241,32 @@ class SidecarHttpServerTest {
     }
 
     @Test
+    void writesDisabledRejectsPostButStillProxiesReads() throws Exception {
+        // A read-only sidecar (OPENDOTA_SIDECAR_ALLOW_WRITES=false) refuses the write with 403 and never
+        // spends the API key on it, while GET reads pass through unchanged.
+        stubUpstream("/api/request/123", 200, "{\"job\":{\"jobId\":42}}");
+        stubUpstream("/api/heroes", 200, "[]");
+
+        OpenDotaClient client = new OpenDotaClient(null, upstreamBase);
+        try (SidecarHttpServer readOnly = new SidecarHttpServer("127.0.0.1", 0, client, null, null, false)) {
+            readOnly.start();
+            String base = "http://127.0.0.1:" + readOnly.port();
+
+            HttpResponse<String> write = post(base, "/api/request/123");
+            assertThat(write.statusCode()).isEqualTo(403);
+            assertThat(write.body()).contains("writes disabled");
+
+            HttpResponse<String> read = http.send(
+                    HttpRequest.newBuilder(URI.create(base + "/api/heroes")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(read.statusCode()).isEqualTo(200);
+        }
+        // The blocked write never reached the upstream; only the read did.
+        assertThat(upstreamMethods).containsExactly("GET");
+        assertThat(upstreamReceived).containsExactly("/api/heroes");
+    }
+
+    @Test
     void postIsTokenGatedLikeGet() throws Exception {
         // A token-gated sidecar requires the shared secret on the POST, just as it does on a GET.
         stubUpstream("/api/players/123/refresh", 200, "ok");

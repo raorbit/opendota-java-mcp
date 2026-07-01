@@ -65,6 +65,8 @@ public final class SidecarHttpServer implements AutoCloseable {
     private final String token;
     /** Host/interface the server is bound to (default {@code 127.0.0.1}); surfaced in the startup log. */
     private final String bindHost;
+    /** Whether inbound {@code POST}s (parse/refresh writes) are forwarded; false makes the sidecar read-only. */
+    private final boolean allowWrites;
 
     /**
      * @param port   loopback port to bind, or {@code 0} to pick an ephemeral one (tests)
@@ -97,11 +99,23 @@ public final class SidecarHttpServer implements AutoCloseable {
      */
     public SidecarHttpServer(String bindHost, int port, OpenDotaClient client, L2CachingGateway gateway,
             String token) throws IOException {
+        this(bindHost, port, client, gateway, token, true);
+    }
+
+    /**
+     * @param allowWrites whether inbound {@code POST}s are forwarded (parse/refresh writes). When
+     *                    {@code false} the write path is rejected with {@code 403} so the sidecar is
+     *                    strictly read-only — a hardening lever for shared/untrusted hosts, matching the
+     *                    direct build's {@code opendota.write-tools-enabled} being off by default.
+     */
+    public SidecarHttpServer(String bindHost, int port, OpenDotaClient client, L2CachingGateway gateway,
+            String token, boolean allowWrites) throws IOException {
         this.client = client;
         this.gateway = gateway;
         String trimmed = token == null ? null : token.trim();
         this.token = (trimmed == null || trimmed.isEmpty()) ? null : trimmed;
         this.bindHost = bindHost;
+        this.allowWrites = allowWrites;
         this.server = HttpServer.create(new InetSocketAddress(bindHost, port), 0);
         this.server.createContext("/health", this::handleHealth);
         this.server.createContext("/stats", this::handleStats);
@@ -112,7 +126,8 @@ public final class SidecarHttpServer implements AutoCloseable {
     public void start() {
         server.start();
         LOG.info(() -> "opendota-sidecar listening on http://" + bindHost + ":" + port()
-                + " (keyed=" + client.isKeyed() + ", auth=" + (token != null) + ", l2=" + (gateway != null) + ")");
+                + " (keyed=" + client.isKeyed() + ", auth=" + (token != null) + ", l2=" + (gateway != null)
+                + ", writes=" + (allowWrites ? "on" : "off") + ")");
     }
 
     /** The bound port (useful when constructed with port {@code 0}). */
@@ -204,6 +219,12 @@ public final class SidecarHttpServer implements AutoCloseable {
             }
             if (!authorized(exchange)) {
                 respond(exchange, 401, "{\"error\":\"unauthorized\"}");
+                return;
+            }
+            if (isWrite && !allowWrites) {
+                // Writes disabled: refuse the parse/refresh POST rather than spend the API key on a
+                // write this sidecar was configured not to make. Reads are unaffected.
+                respond(exchange, 403, "{\"error\":\"writes disabled\"}");
                 return;
             }
             String openDotaPath = toOpenDotaPath(exchange);

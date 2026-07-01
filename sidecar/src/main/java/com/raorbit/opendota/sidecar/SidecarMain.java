@@ -41,6 +41,7 @@ public final class SidecarMain {
         int port = resolvePort();
         String bindHost = resolveBindHost();
         String token = resolveToken();
+        boolean allowWrites = resolveAllowWrites();
         // Fail closed: a non-loopback bind with no token would expose /api and /stats — and the
         // API key the sidecar holds — unauthenticated to anything that can reach the bind address.
         // Refuse to start rather than silently running open (the token gate is the only protection).
@@ -66,7 +67,7 @@ public final class SidecarMain {
 
         SidecarHttpServer server;
         try {
-            server = new SidecarHttpServer(bindHost, port, client, gateway, token);
+            server = new SidecarHttpServer(bindHost, port, client, gateway, token, allowWrites);
         } catch (BindException e) {
             // Most likely a sidecar is already running on this port (the design is one shared
             // process per machine). Fail fast with an actionable message, not a raw stack trace.
@@ -192,6 +193,23 @@ public final class SidecarMain {
         } catch (UnknownHostException e) {
             return true;
         }
+    }
+
+    /**
+     * Whether inbound {@code POST}s (parse/refresh writes) are forwarded. Precedence: system property
+     * {@code opendota.sidecar.allow-writes} (or dashed {@code opendota.sidecar-allow-writes}), else env
+     * {@code OPENDOTA_SIDECAR_ALLOW_WRITES}, else the default {@code true} (writes forwarded, matching the
+     * documented write-forwarding behavior). Only an explicit false-y value ({@code false}/{@code 0}/
+     * {@code no}/{@code off}) turns the sidecar read-only — a hardening lever for shared/untrusted hosts.
+     */
+    static boolean resolveAllowWrites() {
+        String raw = System.getProperty("opendota.sidecar.allow-writes",
+                System.getProperty("opendota.sidecar-allow-writes", System.getenv("OPENDOTA_SIDECAR_ALLOW_WRITES")));
+        if (raw == null || raw.isBlank()) {
+            return true;
+        }
+        String v = raw.trim();
+        return !(v.equalsIgnoreCase("false") || v.equals("0") || v.equalsIgnoreCase("no") || v.equalsIgnoreCase("off"));
     }
 
     private static boolean isBlank(String s) {
