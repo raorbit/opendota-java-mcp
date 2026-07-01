@@ -146,8 +146,8 @@ owns the single rate limiter and a shared cache, and have each server forward to
    > holds — read-only OpenDota calls under your key and the shared rate budget. On a host where
    > not every local user is trusted, require a shared secret: start the sidecar with
    > `OPENDOTA_SIDECAR_TOKEN=<secret>` and set `opendota.sidecar-token=<secret>` on each agent.
-   > `GET /api/*` then requires a matching `X-Sidecar-Token` header (constant-time compared);
-   > `GET /health` stays open. If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
+   > `GET /api/*` and `GET /stats` then require a matching `X-Sidecar-Token` header (constant-time
+   > compared); only `GET /health` stays open. If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
    > and runs **keyless**, which caps all agents at the 60/min keyless limit.
 
    An optional **durable L2 cache** (disk-backed SQLite, off by default) lets the sidecar serve

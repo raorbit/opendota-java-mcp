@@ -206,6 +206,10 @@ to sit behind your own TLS proxy/tunnel.
   you bound a non-loopback address without a token. Set
   `OPENDOTA_HTTP_BEARER_TOKEN` (and `opendota.http.auth-mode=bearer`), or bind
   `server.address=127.0.0.1`.
+- **Refuses to start, "auth-mode=bearer was requested but no bearer token is
+  configured":** the default `auth-mode=bearer` needs a token even on a loopback
+  bind. Set `OPENDOTA_HTTP_BEARER_TOKEN`, or set `opendota.http.auth-mode=none`
+  for an explicitly unauthenticated loopback-only instance.
 - **`401` on every call:** the `Authorization: Bearer <token>` header is missing or
   does not match `opendota.http.bearer-token`. If a proxy injects it, confirm the
   proxy and the app use the same secret.
