@@ -48,7 +48,9 @@ distinct `http`-classified jar:
 
 ```sh
 mvn -Phttp clean package
-# -> target/opendota-mcp-1.2.0-http.jar   (and the plain stdio jar alongside it)
+# -> target/opendota-mcp-1.2.0-http.jar   (the runnable http jar)
+# The unclassified opendota-mcp-1.2.0.jar this build leaves behind is a thin,
+# non-executable jar (no launcher) — for a runnable stdio jar, run a plain `mvn package`.
 ```
 
 The first `-Phttp` build downloads `spring-ai-starter-mcp-server-webmvc` and
