@@ -38,6 +38,22 @@ class LogRetentionCleanerTest {
         assertThat(unrelated).exists();
     }
 
+    @Test
+    void purgeKeepsOldFilesWhosePidSegmentIsNotNumeric(@TempDir Path dir) throws Exception {
+        Instant cutoff = Instant.now().minus(7, ChronoUnit.DAYS);
+        // Matches the "opendota-mcp-*.log" glob but the segment isn't a PID -> a hand-renamed/backup
+        // file the app never wrote; must be kept even though it is well past the retention cutoff.
+        Path backup = stampedLog(dir, "opendota-mcp-backup.log", cutoff.minus(10, ChronoUnit.DAYS));
+        // A genuine old orphan alongside it -> still deleted, proving the guard is selective.
+        Path oldOrphan = stampedLog(dir, "opendota-mcp-200.log", cutoff.minus(1, ChronoUnit.DAYS));
+
+        int deleted = LogRetentionCleaner.purge(dir, "opendota-mcp-${PID}.log", "100", cutoff);
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(oldOrphan).doesNotExist();
+        assertThat(backup).exists();
+    }
+
     private static Path stampedLog(Path dir, String name, Instant mtime) throws IOException {
         Path p = Files.writeString(dir.resolve(name), "x");
         Files.setLastModifiedTime(p, FileTime.from(mtime));
