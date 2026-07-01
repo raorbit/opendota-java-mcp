@@ -108,13 +108,16 @@ public class LogRetentionCleaner implements ApplicationRunner {
         return deleted;
     }
 
-    /** True only for a non-empty all-digits token, i.e. a real PID segment this app writes. */
+    /** True only for a non-empty ASCII-digits token, i.e. a real PID segment this app writes. Uses an
+     *  explicit ASCII range rather than {@link Character#isDigit}, which also accepts non-ASCII Unicode
+     *  digits (Arabic-Indic, fullwidth, …) that this app never emits and must not treat as a PID. */
     private static boolean isPid(String token) {
         if (token.isEmpty()) {
             return false;
         }
         for (int i = 0; i < token.length(); i++) {
-            if (!Character.isDigit(token.charAt(i))) {
+            char c = token.charAt(i);
+            if (c < '0' || c > '9') {
                 return false;
             }
         }
