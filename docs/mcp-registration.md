@@ -147,9 +147,11 @@ owns the single rate limiter and a shared cache, and have each server forward to
    > not every local user is trusted, require a shared secret: start the sidecar with
    > `OPENDOTA_SIDECAR_TOKEN=<secret>` and set `opendota.sidecar-token=<secret>` on each agent.
    > `GET /api/*` and `GET /stats` then require a matching `X-Sidecar-Token` header (constant-time
-   > compared); only `GET /health` stays open. The sidecar also forwards **writes** (`POST /request`,
-   > `/refresh`) under its key; set `OPENDOTA_SIDECAR_ALLOW_WRITES=false` to make it strictly read-only
-   > (writes get `403`). If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
+   > compared); only `GET /health` stays open. The sidecar also forwards agents' **writes** (`POST
+   > /request`, `/refresh`) under its key; set `OPENDOTA_SIDECAR_ALLOW_WRITES=false` to reject those
+   > inbound writes with `403`. (The watched-player auto-parser writes on its own initiative and is
+   > governed separately — turn it off with `OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE=false` too for a
+   > fully write-free sidecar.) If the sidecar starts without `OPENDOTA_API_KEY` it logs a warning
    > and runs **keyless**, which caps all agents at the 60/min keyless limit.
 
    An optional **durable L2 cache** (disk-backed SQLite, off by default) lets the sidecar serve

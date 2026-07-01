@@ -104,9 +104,11 @@ public final class SidecarHttpServer implements AutoCloseable {
 
     /**
      * @param allowWrites whether inbound {@code POST}s are forwarded (parse/refresh writes). When
-     *                    {@code false} the write path is rejected with {@code 403} so the sidecar is
-     *                    strictly read-only — a hardening lever for shared/untrusted hosts, matching the
-     *                    direct build's {@code opendota.write-tools-enabled} being off by default.
+     *                    {@code false} the inbound write path is rejected with {@code 403} — a hardening
+     *                    lever for shared/untrusted hosts, matching the direct build's
+     *                    {@code opendota.write-tools-enabled} being off by default. This gates only
+     *                    inbound HTTP writes; the watched-player auto-parser writes on its own initiative
+     *                    and is governed separately by {@code OPENDOTA_SIDECAR_L2_WATCHED_AUTO_PARSE}.
      */
     public SidecarHttpServer(String bindHost, int port, OpenDotaClient client, L2CachingGateway gateway,
             String token, boolean allowWrites) throws IOException {
