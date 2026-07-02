@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,7 +52,8 @@ public class LogRetentionCleaner implements ApplicationRunner {
             }
             String currentPid = String.valueOf(ProcessHandle.current().pid());
             Instant cutoff = Instant.now().minus(retentionDays, ChronoUnit.DAYS);
-            int deleted = purge(dir, configured.getFileName().toString(), currentPid, cutoff);
+            int deleted = purge(dir, configured.getFileName().toString(), currentPid, cutoff,
+                    LogRetentionCleaner::pidAlive);
             if (deleted > 0) {
                 log.info("purged {} orphaned log file(s) older than {} days from {}", deleted, retentionDays, dir);
             }
@@ -65,10 +67,15 @@ public class LogRetentionCleaner implements ApplicationRunner {
      * Delete per-PID log files in {@code dir} older than {@code cutoff}, keeping the current PID's file
      * and any name that doesn't match the {@code <prefix>-<numeric-pid>.log} shape — both a legacy
      * {@code opendota-mcp.log} (no PID segment) and a hand-renamed {@code opendota-mcp-backup.log}
-     * (non-numeric segment) are left alone. Returns the number deleted. Package-private + static so it's
-     * unit-testable against a temp dir without booting Spring.
+     * (non-numeric segment) are left alone. A file whose PID belongs to a still-live process (per
+     * {@code pidAlive}) is also kept, so a second app instance on this machine (desktop clients spawn one
+     * server per chat) never deletes an idle sibling's open log — on Linux/macOS that would unlink the
+     * inode the live process still writes to and silently lose its logs. Returns the number deleted.
+     * Package-private + static, with the liveness check injected, so it's unit-testable against a temp
+     * dir without booting Spring or depending on which PIDs happen to be live on the test host.
      */
-    static int purge(Path dir, String templateFileName, String currentPid, Instant cutoff) {
+    static int purge(Path dir, String templateFileName, String currentPid, Instant cutoff,
+                     Predicate<String> pidAlive) {
         int dash = templateFileName.lastIndexOf('-');
         int dot = templateFileName.lastIndexOf('.');
         if (dash < 0 || dot <= dash) {
@@ -93,6 +100,12 @@ public class LogRetentionCleaner implements ApplicationRunner {
                     // merely fits the glob is left alone rather than silently purged.
                     continue;
                 }
+                if (pidAlive.test(pid)) {
+                    // Another live instance still owns this file — keep it. (After PID reuse this may be an
+                    // unrelated process, so a truly-orphaned file whose PID got recycled is left behind
+                    // rather than risk deleting a live process's log; the age glob still bounds accumulation.)
+                    continue;
+                }
                 try {
                     if (Files.getLastModifiedTime(p).toInstant().isBefore(cutoff)) {
                         Files.deleteIfExists(p);
@@ -106,6 +119,16 @@ public class LogRetentionCleaner implements ApplicationRunner {
             log.debug("could not list log directory {}", dir, e);
         }
         return deleted;
+    }
+
+    /** Whether {@code pid} (an ASCII-digit string) is a currently-live OS process. A value too large to
+     *  be a {@code long} is treated as not alive (safe to purge — this app never emits such a PID). */
+    private static boolean pidAlive(String pid) {
+        try {
+            return ProcessHandle.of(Long.parseLong(pid)).isPresent();
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     /** True only for a non-empty ASCII-digits token, i.e. a real PID segment this app writes. Uses an
