@@ -23,6 +23,10 @@ services:
       OPENDOTA_SIDECAR_BIND: "0.0.0.0"
       OPENDOTA_SIDECAR_L2: "true"
       OPENDOTA_SIDECAR_L2_DB: "/data/l2-cache.db"
+      # Forward agents' inbound writes (POST parse/refresh) through the sidecar. Defaults to "on" when
+      # unset; set OPENDOTA_SIDECAR_ALLOW_WRITES=false in .env to reject them with 403 (a hardening lever
+      # for shared/untrusted hosts). Forwarded from .env so the toggle actually reaches the container.
+      OPENDOTA_SIDECAR_ALLOW_WRITES: "${OPENDOTA_SIDECAR_ALLOW_WRITES:-}"
       # Watched-player archive (all optional; blank = feature off / sensible defaults). Forwarded
       # from .env so the archive can be configured without editing this file.
       OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS: "${OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS:-}"
