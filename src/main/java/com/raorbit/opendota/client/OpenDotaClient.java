@@ -44,6 +44,19 @@ public class OpenDotaClient implements AutoCloseable {
      * full-text query against the players table is routinely slow and times out at the default).
      */
     private static final Duration SLOW_REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    /**
+     * Request timeout a FORWARDING client applies to the loopback sidecar hop. It must cover the sidecar's
+     * whole service time for a path, which is much longer than a direct call's: the sidecar may park up to
+     * its own rate-limit budget (~10s) waiting for a shared permit under multi-agent contention, then spend
+     * its own upstream timeout, plus — for a direct GET — up to two transient-failure retries with backoff.
+     * Sizing the loopback timeout to the direct 15s/30s would spuriously fail a contended-but-healthy
+     * sidecar mid-fetch (wasting the scarce permit and the response it is about to cache), so it is set
+     * well above that. This covers the common contended case and normal transient retries; a pathological
+     * back-to-back-5xx retry storm can still exceed it, but that is rare and self-limiting.
+     */
+    private static final Duration FORWARDING_REQUEST_TIMEOUT = Duration.ofSeconds(60);
+    /** As {@link #FORWARDING_REQUEST_TIMEOUT} but for the sidecar's slow endpoints ({@code /search}, {@code /explorer}). */
+    private static final Duration FORWARDING_SLOW_REQUEST_TIMEOUT = Duration.ofSeconds(90);
     /** Max retries of an idempotent GET after a transient upstream failure (a 5xx, or a fast-endpoint timeout). */
     private static final int MAX_UPSTREAM_RETRIES = 2;
     /** Initial backoff between upstream retries (doubles up to the cap). */
@@ -293,7 +306,7 @@ public class OpenDotaClient implements AutoCloseable {
         }
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(REQUEST_TIMEOUT)
+                .timeout(forwarding ? FORWARDING_REQUEST_TIMEOUT : REQUEST_TIMEOUT)
                 .header("User-Agent", USER_AGENT)
                 .POST(HttpRequest.BodyPublishers.noBody());
         if (forwardingToken != null) {
@@ -407,7 +420,7 @@ public class OpenDotaClient implements AutoCloseable {
             url += (path.indexOf('?') >= 0 ? "&" : "?") + "api_key=" + encode(apiKey);
         }
 
-        Duration requestTimeout = requestTimeoutFor(path);
+        Duration requestTimeout = forwarding ? forwardingTimeoutFor(path) : requestTimeoutFor(path);
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(requestTimeout)
@@ -426,7 +439,9 @@ public class OpenDotaClient implements AutoCloseable {
         // call by a single deadline (below) rather than a fresh full budget per attempt — so a saturated
         // bucket plus retries can't stack up to maxAttempts × rateLimitBudget. Forwarding never retries
         // here (its refused-connection retry lives in send()).
-        boolean slow = requestTimeout.compareTo(REQUEST_TIMEOUT) > 0;
+        // Only meaningful for direct GETs (forwarding never retries here); a forwarding client's longer
+        // timeout must not be read as a "slow endpoint" signal for the retry decisions below.
+        boolean slow = !forwarding && requestTimeout.compareTo(REQUEST_TIMEOUT) > 0;
         int maxAttempts = forwarding ? 1 : 1 + MAX_UPSTREAM_RETRIES;
         Duration backoff = UPSTREAM_RETRY_BASE_BACKOFF;
         // One permit-wait deadline for the whole call: each attempt waits only until this, never a fresh
@@ -517,6 +532,22 @@ public class OpenDotaClient implements AutoCloseable {
         int q = path.indexOf('?');
         String p = q >= 0 ? path.substring(0, q) : path;
         return p.startsWith("/search") || p.startsWith("/explorer") ? SLOW_REQUEST_TIMEOUT : REQUEST_TIMEOUT;
+    }
+
+    /**
+     * The request timeout a forwarding client applies to the loopback sidecar hop, mirroring the slow-path
+     * split of {@link #requestTimeoutFor} but at the larger forwarding scale (the sidecar's slow endpoints
+     * take its extended upstream timeout, which the loopback wait must outlast). See
+     * {@link #FORWARDING_REQUEST_TIMEOUT}.
+     */
+    private static Duration forwardingTimeoutFor(String path) {
+        if (path == null) {
+            return FORWARDING_REQUEST_TIMEOUT;
+        }
+        int q = path.indexOf('?');
+        String p = q >= 0 ? path.substring(0, q) : path;
+        return p.startsWith("/search") || p.startsWith("/explorer")
+                ? FORWARDING_SLOW_REQUEST_TIMEOUT : FORWARDING_REQUEST_TIMEOUT;
     }
 
     /**
