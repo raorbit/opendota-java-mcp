@@ -168,6 +168,17 @@ class SidecarHttpServerTest {
     }
 
     @Test
+    void benignPercentEncodedSegmentIsForwardedNotRejected() throws Exception {
+        // The traversal guard must reject only encoded dot-segments/separators, NOT ordinary
+        // percent-encoding (e.g. get_constants of a non-ASCII resource). Such a request must forward
+        // verbatim — behaving like a direct client — rather than being 404'd by the sidecar. %6F -> 'o'.
+        stubUpstream("/api/constants", 200, "{}");   // prefix context; matches /api/constants/...
+        HttpResponse<String> r = get("/api/constants/fo%6F");
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(upstreamReceived).containsExactly("/api/constants/fo%6F");
+    }
+
+    @Test
     void healthReturnsOk() throws Exception {
         HttpResponse<String> r = get("/health");
         assertThat(r.statusCode()).isEqualTo(200);

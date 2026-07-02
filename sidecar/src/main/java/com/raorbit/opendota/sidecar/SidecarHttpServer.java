@@ -330,12 +330,15 @@ public final class SidecarHttpServer implements AutoCloseable {
         }
         // Reject path traversal. The JDK HttpClient sends the path verbatim (it does not normalize), so a
         // ".." would let a caller escape the intended /api/<endpoint> shape and reach other paths under
-        // api.opendota.com on the sidecar's key. OpenDota endpoint paths are fixed names and numeric ids —
-        // every dynamic value rides in the query string (handled separately below) — so a '%' in the PATH
-        // is never legitimate. Reject it outright: that closes percent-encoded dot-segments (%2e%2e) and
-        // encoded separators (%2f/%5c) that would otherwise pass the literal check and be forwarded
-        // verbatim, where a normalizing upstream/CDN could collapse them back into a traversal.
-        if (path.indexOf('%') >= 0) {
+        // api.opendota.com on the sidecar's key. Reject the literal dot-segments (below) plus the ENCODED
+        // forms that would otherwise slip past a literal check and be forwarded verbatim, where a
+        // normalizing upstream/CDN could collapse them back into a traversal: an encoded dot ('%2e'), the
+        // encoded separators ('%2f'/'%5c'), and the encoded percent ('%25', which would let a double-
+        // encoded payload through). Ordinary percent-encoding of other segment characters is left alone,
+        // so a legitimately-encoded path segment (e.g. a non-ASCII get_constants resource) forwards
+        // exactly as it would for a direct client.
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%25")) {
             return null;
         }
         for (String segment : path.split("[/\\\\]")) {
