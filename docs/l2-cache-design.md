@@ -354,8 +354,12 @@ match history would grow the file without limit.
 - Eviction is best-effort and need not be transactional with the store; a transiently over-cap
   file is acceptable (same soft-bound stance as `TtlCache`).
 - **Liveness pass (first):** `enforceCaps` first runs `evictExpired(now)` —
-  `DELETE FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at <= ? RETURNING LENGTH(CAST(body AS BLOB))`
-  — to physically delete already-expired TTL rows before the `stored_at`-ascending cap pass. Without
+  `DELETE FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at <= ? AND classification != 'PINNED' RETURNING LENGTH(CAST(body AS BLOB))`
+  — to physically delete already-expired TTL rows before the `stored_at`-ascending cap pass. The
+  `classification != 'PINNED'` guard is mandatory (see §6.5): an *unparsed* PINNED row carries an
+  `expires_at` as a re-fetch stamp, not a death sentence, so without this filter the liveness pass would
+  delete watched-archive rows the instant their re-check stamp elapsed — the silent data loss the archive
+  exists to prevent. Without
   this, a dead-but-newer TTL row could outlive an older-but-valid PERMANENT match (LRU orders by
   `stored_at`, not liveness) and dead rows would count against the caps. The read predicate
   (`expires_at IS NULL OR expires_at > now`) already hides expired rows from reads, so this is a

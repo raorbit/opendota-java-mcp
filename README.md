@@ -322,8 +322,10 @@ Then point each agent at it by setting `opendota.sidecar-enabled=true` (and leav
 exposes `GET /health`, and defaults to port `31337` (override with
 `OPENDOTA_SIDECAR_PORT` or `-Dopendota.sidecar.port=<port>`, and point agents at the same
 port with `opendota.sidecar-port`). If an agent starts before the sidecar, it retries the
-connection briefly. The sidecar has no authentication, so only run it on a host where every
-local user is trusted. See
+connection briefly. On a loopback bind the sidecar is unauthenticated by default, so only run it
+where every local user is trusted; to gate `/api` and `/stats` behind a shared secret (required for a
+non-loopback bind), set `OPENDOTA_SIDECAR_TOKEN` — this works for the plain `java -jar` run too, not
+just Docker. See
 [`docs/mcp-registration.md`](docs/mcp-registration.md#shared-sidecar-for-multiple-agents).
 
 The sidecar forwards both reads (`GET`) and writes (`POST`): agents' [write tools](#write-tools-opt-in)

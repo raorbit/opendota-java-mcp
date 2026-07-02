@@ -3,7 +3,11 @@
 All notable changes to **opendota-mcp** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project aims to follow semantic versioning.
 
-## [Unreleased]
+## [1.2.0] - 2026-06-24
+
+Container packaging for both the MCP server and the shared sidecar, published to GHCR; a configurable
+sidecar bind host gated by a fail-closed token requirement; the watched-player match archive; and
+sidecar write forwarding.
 
 ### Added
 
@@ -25,25 +29,18 @@ All notable changes to **opendota-mcp** are documented here. The format follows
   bypass the cache and are rate-limited like any other call; the token gate (when set) applies to them
   too.
 
-### Changed
-
-- The opt-in write tools now work over sidecar forwarding: enabling `opendota.write-tools-enabled=true`
-  together with `opendota.sidecar-enabled=true` is supported (previously it failed fast at startup, as
-  the sidecar was GET-only).
-
-## [1.2.0] - 2026-06-24
-
-Container packaging for both the MCP server and the shared sidecar, published to GHCR, plus a
-configurable sidecar bind host gated by a fail-closed token requirement.
-
-### Added
-
 - **Docker images.** A multi-stage `Dockerfile` for the stdio MCP server and a `sidecar/Dockerfile`
   for the shared sidecar, plus a `docker-compose.yml` (durable L2 volume, host-loopback publish,
   token-gated) and a committed `.env.example`. The release workflow now builds and pushes both
   images multi-arch (`linux/amd64`, `linux/arm64`) to GHCR, tagged from the release version.
 - **`OPENDOTA_SIDECAR_BIND`** (system property `opendota.sidecar.bind` / `opendota.sidecar-bind`)
   to set the sidecar's bind host; defaults to `127.0.0.1` (loopback-only, unchanged).
+
+### Changed
+
+- The opt-in write tools now work over sidecar forwarding: enabling `opendota.write-tools-enabled=true`
+  together with `opendota.sidecar-enabled=true` is supported (previously it failed fast at startup, as
+  the sidecar was GET-only).
 
 ### Security
 
