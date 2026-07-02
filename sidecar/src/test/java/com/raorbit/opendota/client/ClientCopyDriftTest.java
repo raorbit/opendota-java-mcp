@@ -4,9 +4,12 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Set;
+import java.util.TreeSet;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -72,6 +75,23 @@ class ClientCopyDriftTest {
         }
         // Guard against a vacuous pass (e.g. an emptied COPIED array): every file must be checked.
         assertThat(compared).as("all copied client files must be compared").isEqualTo(COPIED.length);
+
+        // Completeness guard beyond the hard-coded names: the sidecar client package must contain EXACTLY
+        // the guarded copies — no more, no fewer. This catches a NEW security-relevant class copied into
+        // the sidecar (the copy pattern already exists for these four) that was never added to COPIED and
+        // would otherwise drift unguarded, as well as a guarded file deleted from the sidecar. We assert
+        // against the SIDECAR side, which holds only copies; the ROOT package may legitimately carry
+        // additional non-copied classes (e.g. ToolResults) so a root==sidecar equality would be wrong.
+        Set<String> sidecarClientFiles = new TreeSet<>();
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(moduleDir.resolve(CLIENT_PKG), "*.java")) {
+            for (Path p : stream) {
+                sidecarClientFiles.add(p.getFileName().toString());
+            }
+        }
+        assertThat(sidecarClientFiles)
+                .as("the sidecar client package must contain exactly the drift-guarded copies; a new .java "
+                        + "file here must be added to COPIED (and mirrored from the root) so it is byte-compared too")
+                .containsExactlyInAnyOrder(COPIED);
     }
 
     /** True when running under CI, where a missing root tree must fail rather than skip. */
