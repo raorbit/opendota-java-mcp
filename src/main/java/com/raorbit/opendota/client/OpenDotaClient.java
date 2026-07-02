@@ -526,12 +526,7 @@ public class OpenDotaClient implements AutoCloseable {
      * full-text query and {@code /explorer}'s ad-hoc SQL both routinely exceed the default.
      */
     private static Duration requestTimeoutFor(String path) {
-        if (path == null) {
-            return REQUEST_TIMEOUT;
-        }
-        int q = path.indexOf('?');
-        String p = q >= 0 ? path.substring(0, q) : path;
-        return p.startsWith("/search") || p.startsWith("/explorer") ? SLOW_REQUEST_TIMEOUT : REQUEST_TIMEOUT;
+        return isSlowPath(path) ? SLOW_REQUEST_TIMEOUT : REQUEST_TIMEOUT;
     }
 
     /**
@@ -541,13 +536,22 @@ public class OpenDotaClient implements AutoCloseable {
      * {@link #FORWARDING_REQUEST_TIMEOUT}.
      */
     private static Duration forwardingTimeoutFor(String path) {
+        return isSlowPath(path) ? FORWARDING_SLOW_REQUEST_TIMEOUT : FORWARDING_REQUEST_TIMEOUT;
+    }
+
+    /**
+     * Whether {@code path} targets one of OpenDota's known-slow endpoints ({@code /search}'s full-text
+     * query and {@code /explorer}'s ad-hoc SQL), which earn the extended timeout. The query string is
+     * stripped before the prefix test; a {@code null} path is not slow. Single source of truth for both
+     * the direct and forwarding timeout selectors.
+     */
+    private static boolean isSlowPath(String path) {
         if (path == null) {
-            return FORWARDING_REQUEST_TIMEOUT;
+            return false;
         }
         int q = path.indexOf('?');
         String p = q >= 0 ? path.substring(0, q) : path;
-        return p.startsWith("/search") || p.startsWith("/explorer")
-                ? FORWARDING_SLOW_REQUEST_TIMEOUT : FORWARDING_REQUEST_TIMEOUT;
+        return p.startsWith("/search") || p.startsWith("/explorer");
     }
 
     /**
