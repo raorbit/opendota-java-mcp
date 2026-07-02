@@ -30,7 +30,14 @@ $Port    = if ($env:OPENDOTA_SIDECAR_PORT) { $env:OPENDOTA_SIDECAR_PORT } else {
 function Get-SidecarProcess {
   if (-not (Test-Path $PidFile)) { return $null }
   $procId = Get-Content $PidFile | Select-Object -First 1
-  return Get-Process -Id $procId -ErrorAction SilentlyContinue
+  $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+  if (-not $proc) { return $null }
+  # Guard against a stale PID the OS has recycled for an unrelated program: confirm the process is really
+  # our sidecar JVM (its command line references the jar) before treating it as running or, in
+  # Stop-Sidecar, killing it. If the command line can't be read, treat it as not-ours (the safe direction).
+  $ci = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+  if (-not $ci -or $ci.CommandLine -notmatch 'opendota-sidecar') { return $null }
+  return $proc
 }
 
 function Start-Sidecar {
@@ -51,9 +58,12 @@ function Start-Sidecar {
   # (e.g. BindException because the port is taken). Poll /health for ~5s; bail if the process exits.
   for ($i = 0; $i -lt 25; $i++) {
     if ($proc.HasExited) {
-      Write-Host "sidecar exited during startup (exit $($proc.ExitCode)) - see $LogFile"
+      # Startup errors (BindException, the fail-closed guard) are logged by java.util.logging to STDERR,
+      # which Start-Process below redirects to "$LogFile.err" — point the user at both files, and exit
+      # non-zero so a caller/CI sees the failure (matching the bash script's `exit 1`).
+      Write-Host "sidecar exited during startup (exit $($proc.ExitCode)) - see $LogFile and $LogFile.err"
       Remove-Item $PidFile -ErrorAction SilentlyContinue
-      return
+      exit 1
     }
     try {
       Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 1 | Out-Null
@@ -63,7 +73,7 @@ function Start-Sidecar {
       Start-Sleep -Milliseconds 200
     }
   }
-  Write-Host "started (pid $($proc.Id)) but /health did not answer within 5s - check $LogFile"
+  Write-Host "started (pid $($proc.Id)) but /health did not answer within 5s - check $LogFile and $LogFile.err"
 }
 
 function Stop-Sidecar {
