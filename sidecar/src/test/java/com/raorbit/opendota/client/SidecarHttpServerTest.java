@@ -156,8 +156,14 @@ class SidecarHttpServerTest {
         // A raw '..' segment must be rejected rather than forwarded to OpenDota unnormalized (the JDK
         // HttpClient would strip it, so it is sent over a socket). Never reaches the upstream.
         stubUpstream("/api/records", 200, "[]");
-        assertThat(rawRequest("GET", "/api/../records", "127.0.0.1:" + sidecar.port())).isEqualTo(404);
-        assertThat(rawRequest("GET", "/api/players/../../records", "127.0.0.1:" + sidecar.port())).isEqualTo(404);
+        String host = "127.0.0.1:" + sidecar.port();
+        assertThat(rawRequest("GET", "/api/../records", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/../../records", host)).isEqualTo(404);
+        // Percent-encoded traversal must be rejected too: %2e%2e (lower/upper) and encoded separators
+        // (%2f) would otherwise pass a literal ".." check and be sent verbatim to a normalizing upstream.
+        assertThat(rawRequest("GET", "/api/players/%2e%2e/%2e%2e/admin", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/%2E%2E/records", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/..%2f..%2fadmin", host)).isEqualTo(404);
         assertThat(upstreamHits.get()).isZero();
     }
 
