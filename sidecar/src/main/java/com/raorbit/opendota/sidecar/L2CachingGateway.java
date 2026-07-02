@@ -416,7 +416,10 @@ public final class L2CachingGateway implements AutoCloseable {
                     // attempt with the failure backoff rather than leaving the timer untouched: otherwise a
                     // sustained outage plus steady patch-scoped traffic re-fetches on essentially every
                     // request. The next check is due after PATCH_CHECK_FAILURE_BACKOFF_MILLIS, not never.
-                    lastPatchCheckMillis = now;
+                    // Re-read the clock AFTER the (possibly slow, timeout-length) observe so the backoff
+                    // window starts when the failed attempt finished, not when it began — otherwise a
+                    // fetch that blocks longer than the backoff would elapse the window instantly.
+                    lastPatchCheckMillis = System.currentTimeMillis();
                     lastPatchCheckFailed = true;
                 }
                 return observed != null ? observed : stored;
