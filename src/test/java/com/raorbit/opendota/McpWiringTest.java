@@ -34,23 +34,39 @@ class McpWiringTest {
                 .map(cb -> cb.getToolDefinition().name())
                 .toList();
 
+        // Every read @Tool must be registered. This lists ALL of them (not a subset): combined with the
+        // exact-count assertion below it is an exhaustiveness guard, so dropping a tool's @Tool annotation
+        // (or adding a new one without updating this test) fails the build instead of silently changing the
+        // tools/list surface. Grouped by tool class.
         assertThat(names).contains(
+                // PlayerTools (15)
                 "search_players", "get_player", "get_player_wl", "get_player_recent_matches",
-                "get_player_matches", "get_player_heroes",
-                "get_match", "get_pro_matches", "get_public_matches", "get_live_games",
-                "list_heroes", "get_hero_stats", "get_hero_rankings", "get_constants",
-                "run_sql_explorer", "get_sql_schema",
-                "get_hero_matchups", "get_hero_item_popularity", "get_hero_durations",
-                "get_hero_players", "get_hero_matches",
-                "get_team", "get_team_matches", "get_league", "get_league_matches", "get_pro_players",
-                "get_top_players", "get_teams", "get_team_players", "get_team_heroes",
-                "get_leagues", "get_league_teams",
-                "get_records", "get_parsed_matches", "get_metadata", "get_health",
+                "get_player_peers", "get_player_totals", "get_player_matches", "get_player_heroes",
                 "get_player_ratings", "get_player_rankings", "get_player_counts", "get_player_histograms",
-                "get_player_pros", "get_player_wardmap", "get_player_wordcloud");
+                "get_player_pros", "get_player_wardmap", "get_player_wordcloud",
+                // MatchTools (4)
+                "get_match", "get_pro_matches", "get_public_matches", "get_live_games",
+                // HeroTools (11)
+                "list_heroes", "get_hero_stats", "get_hero_rankings", "get_benchmarks",
+                "get_hero_matchups", "get_hero_item_popularity", "get_hero_durations",
+                "get_hero_players", "get_hero_matches", "get_distributions", "get_constants",
+                // LeagueTools (4)
+                "get_league", "get_league_matches", "get_leagues", "get_league_teams",
+                // ExplorerTools (2)
+                "run_sql_explorer", "get_sql_schema",
+                // TeamTools (5)
+                "get_team", "get_team_matches", "get_teams", "get_team_players", "get_team_heroes",
+                // ProTools (2)
+                "get_pro_players", "get_top_players",
+                // MiscTools (4)
+                "get_records", "get_parsed_matches", "get_metadata", "get_health");
 
         // The write tools are opt-in; with the flag unset they must NOT be registered.
         assertThat(names).doesNotContain("request_parse", "refresh_player", "get_parse_request");
+
+        // Exhaustiveness: exactly the 47 read tools above, no more (a dropped @Tool) and no fewer (a new
+        // one not added to this test). If this count changes, update the grouped list above to match.
+        assertThat(names).hasSize(47);
     }
 
     @Test

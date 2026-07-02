@@ -6,11 +6,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -105,6 +108,74 @@ class SidecarHttpServerTest {
         return http.send(
                 HttpRequest.newBuilder(URI.create(base + path)).POST(HttpRequest.BodyPublishers.noBody()).build(),
                 HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * Send a raw HTTP/1.1 request with an explicit request-target and {@code Host} header, returning the
+     * response status code. Needed because the JDK {@link HttpClient} normalizes {@code ..} out of the
+     * path and forbids setting the {@code Host} header — both of which these guards must be tested against.
+     */
+    private int rawRequest(String method, String target, String hostHeader) throws IOException {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", sidecar.port()), 2000);
+            socket.setSoTimeout(2000);
+            socket.getOutputStream().write((method + " " + target + " HTTP/1.1\r\n"
+                    + "Host: " + hostHeader + "\r\n"
+                    + "Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            socket.getOutputStream().flush();
+            BufferedReader in = new BufferedReader(
+                    new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
+            String statusLine = in.readLine();   // e.g. "HTTP/1.1 403 Forbidden"
+            if (statusLine == null) {
+                return -1;
+            }
+            String[] parts = statusLine.split(" ");
+            return parts.length >= 2 ? Integer.parseInt(parts[1]) : -1;
+        }
+    }
+
+    @Test
+    void nonLoopbackHostHeaderIsRejectedWhenNoTokenSet() throws Exception {
+        // The default sidecar has no token: a request whose Host is NOT a loopback name — as a
+        // DNS-rebinding page sends (its own hostname) — is refused with 403 before reaching the shared
+        // client/upstream, while a genuine loopback Host is served. Guards against DNS rebinding of the
+        // token-less loopback listener.
+        stubUpstream("/api/heroes", 200, "[]");
+        // A spoofed (non-loopback) Host is refused with 403 and never reaches the upstream...
+        assertThat(rawRequest("GET", "/api/heroes", "evil.example.com")).isEqualTo(403);
+        assertThat(upstreamHits.get()).isZero();
+        // ...while genuine loopback Hosts are served.
+        assertThat(rawRequest("GET", "/api/heroes", "127.0.0.1:" + sidecar.port())).isEqualTo(200);
+        assertThat(rawRequest("GET", "/api/heroes", "localhost")).isEqualTo(200);
+        // /heroes is cacheable, so the two allowed reads collapse to a single upstream fetch.
+        assertThat(upstreamHits.get()).isEqualTo(1);
+    }
+
+    @Test
+    void dotSegmentPathsAreRejected() throws Exception {
+        // A raw '..' segment must be rejected rather than forwarded to OpenDota unnormalized (the JDK
+        // HttpClient would strip it, so it is sent over a socket). Never reaches the upstream.
+        stubUpstream("/api/records", 200, "[]");
+        String host = "127.0.0.1:" + sidecar.port();
+        assertThat(rawRequest("GET", "/api/../records", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/../../records", host)).isEqualTo(404);
+        // Percent-encoded traversal must be rejected too: %2e%2e (lower/upper) and encoded separators
+        // (%2f) would otherwise pass a literal ".." check and be sent verbatim to a normalizing upstream.
+        assertThat(rawRequest("GET", "/api/players/%2e%2e/%2e%2e/admin", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/%2E%2E/records", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/..%2f..%2fadmin", host)).isEqualTo(404);
+        assertThat(upstreamHits.get()).isZero();
+    }
+
+    @Test
+    void benignPercentEncodedSegmentIsForwardedNotRejected() throws Exception {
+        // The traversal guard must reject only encoded dot-segments/separators, NOT ordinary
+        // percent-encoding (e.g. get_constants of a non-ASCII resource). Such a request must forward
+        // verbatim — behaving like a direct client — rather than being 404'd by the sidecar. %6F -> 'o'.
+        stubUpstream("/api/constants", 200, "{}");   // prefix context; matches /api/constants/...
+        HttpResponse<String> r = get("/api/constants/fo%6F");
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(upstreamReceived).containsExactly("/api/constants/fo%6F");
     }
 
     @Test

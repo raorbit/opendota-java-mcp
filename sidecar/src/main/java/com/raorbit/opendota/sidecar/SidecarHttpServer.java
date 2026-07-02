@@ -10,6 +10,8 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
 
@@ -47,6 +49,11 @@ public final class SidecarHttpServer implements AutoCloseable {
     private static final String API_PREFIX = "/api";
     /** Request header carrying the optional shared secret an auth-gated sidecar requires. */
     private static final String TOKEN_HEADER = "X-Sidecar-Token";
+    /**
+     * Literal loopback hosts accepted in the {@code Host} header when no token is configured, as an
+     * anti-DNS-rebinding guard (see {@link #hostAllowed}). Compared as literals, never DNS-resolved.
+     */
+    private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "::1");
     /**
      * Coarse wire-contract version, surfaced on {@code /health} and {@code /stats} so an operator can spot
      * a sidecar running a different build than its agents. Bump only on a wire-contract change.
@@ -167,6 +174,10 @@ public final class SidecarHttpServer implements AutoCloseable {
                 respond(exchange, 405, "{\"error\":\"method not allowed\"}");
                 return;
             }
+            if (!hostAllowed(exchange)) {
+                respond(exchange, 403, "{\"error\":\"forbidden\"}");
+                return;
+            }
             if (!authorized(exchange)) {
                 respond(exchange, 401, "{\"error\":\"unauthorized\"}");
                 return;
@@ -217,6 +228,10 @@ public final class SidecarHttpServer implements AutoCloseable {
             boolean isWrite = "POST".equals(method);
             if (!isGet && !isWrite) {
                 respond(exchange, 405, "{\"error\":\"method not allowed\"}");
+                return;
+            }
+            if (!hostAllowed(exchange)) {
+                respond(exchange, 403, "{\"error\":\"forbidden\"}");
                 return;
             }
             if (!authorized(exchange)) {
@@ -270,6 +285,39 @@ public final class SidecarHttpServer implements AutoCloseable {
                 presented.getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * Anti-DNS-rebinding guard for the token-less loopback default. When no token is configured the only
+     * legitimate callers are local agents reaching {@code 127.0.0.1}/{@code localhost}, so a request whose
+     * {@code Host} header is anything else is refused: a malicious web page that rebinds its own hostname
+     * to this loopback port still sends that hostname as {@code Host}, and page JavaScript cannot forge it
+     * (it is a forbidden header). The value is matched as a literal — never DNS-resolved — because
+     * resolving an attacker hostname the victim already rebound to {@code 127.0.0.1} would report loopback
+     * and defeat the check. When a token IS set the shared-secret requirement already blocks a rebinding
+     * page (it cannot know the secret) and the bind may legitimately be a container service name, so the
+     * host check is skipped there.
+     */
+    private boolean hostAllowed(HttpExchange exchange) {
+        if (token != null) {
+            return true;
+        }
+        String host = exchange.getRequestHeaders().getFirst("Host");
+        if (host == null || host.isBlank()) {
+            return false;   // HTTP/1.1 mandates Host; a local agent always sends one.
+        }
+        return LOOPBACK_HOSTS.contains(hostOnly(host));
+    }
+
+    /** The host part of a {@code Host} header, lower-cased, with any {@code :port} and IPv6 brackets removed. */
+    private static String hostOnly(String host) {
+        String h = host.trim();
+        if (h.startsWith("[")) {   // IPv6 literal, e.g. [::1]:31337
+            int close = h.indexOf(']');
+            return (close > 0 ? h.substring(1, close) : h).toLowerCase(Locale.ROOT);
+        }
+        int colon = h.indexOf(':');
+        return (colon >= 0 ? h.substring(0, colon) : h).toLowerCase(Locale.ROOT);
+    }
+
     /** Translate an inbound {@code /api/...} request target into an OpenDota path with its query. */
     private static String toOpenDotaPath(HttpExchange exchange) {
         String rawPath = exchange.getRequestURI().getRawPath();   // e.g. /api/players/123
@@ -279,6 +327,24 @@ public final class SidecarHttpServer implements AutoCloseable {
         String path = rawPath.substring(API_PREFIX.length());     // e.g. /players/123
         if (path.isEmpty() || path.charAt(0) != '/') {
             return null;
+        }
+        // Reject path traversal. The JDK HttpClient sends the path verbatim (it does not normalize), so a
+        // ".." would let a caller escape the intended /api/<endpoint> shape and reach other paths under
+        // api.opendota.com on the sidecar's key. Reject the literal dot-segments (below) plus the ENCODED
+        // forms that would otherwise slip past a literal check and be forwarded verbatim, where a
+        // normalizing upstream/CDN could collapse them back into a traversal: an encoded dot ('%2e'), the
+        // encoded separators ('%2f'/'%5c'), and the encoded percent ('%25', which would let a double-
+        // encoded payload through). Ordinary percent-encoding of other segment characters is left alone,
+        // so a legitimately-encoded path segment (e.g. a non-ASCII get_constants resource) forwards
+        // exactly as it would for a direct client.
+        String lower = path.toLowerCase(Locale.ROOT);
+        if (lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") || lower.contains("%25")) {
+            return null;
+        }
+        for (String segment : path.split("[/\\\\]")) {
+            if (segment.equals("..") || segment.equals(".")) {
+                return null;
+            }
         }
         String query = exchange.getRequestURI().getRawQuery();
         return query == null ? path : path + "?" + query;

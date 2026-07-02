@@ -83,8 +83,18 @@ public final class L2CachingGateway implements AutoCloseable {
     private final AtomicLong noStore = new AtomicLong();
 
     // --- patch-check bookkeeping (spec §5.2) ---
-    /** Last time (epoch millis) a patch check ran; {@code 0} means never. */
+    /**
+     * Shortest gap between patch checks after a transient failure to observe the patch. A failed
+     * {@code /constants/patch} fetch is not L1-cached (errors aren't cached), so without a backoff a
+     * sustained upstream outage plus steady patch-scoped traffic would re-attempt the fetch on essentially
+     * every request, burning a rate-limiter permit each time. Capped by {@code patchCheckMillis} so a
+     * (tiny) configured interval is never lengthened.
+     */
+    private static final long PATCH_CHECK_FAILURE_BACKOFF_MILLIS = 60_000L;
+    /** Last time (epoch millis) a patch check was attempted; {@code 0} means never. */
     private volatile long lastPatchCheckMillis;
+    /** Whether the last attempt failed to observe a patch id, so the next check uses the shorter failure backoff. */
+    private volatile boolean lastPatchCheckFailed;
     /** Guards a single in-flight patch check so concurrent PERMANENT requests don't all check at once. */
     private final AtomicBoolean patchCheckInProgress = new AtomicBoolean(false);
     /** Paths with a store in flight, so concurrent single-flight misses collapse to one write. */
@@ -381,7 +391,12 @@ public final class L2CachingGateway implements AutoCloseable {
     private String maybeCheckPatch() {
         long now = System.currentTimeMillis();
         long last = lastPatchCheckMillis;
-        boolean due = last == 0L || (now - last) >= config.patchCheckMillis();
+        // After a failed observe, re-check after the shorter failure backoff (not the full window) so an
+        // outage retries periodically instead of on every request; a success uses the normal interval.
+        long interval = lastPatchCheckFailed
+                ? Math.min(PATCH_CHECK_FAILURE_BACKOFF_MILLIS, config.patchCheckMillis())
+                : config.patchCheckMillis();
+        boolean due = last == 0L || (now - last) >= interval;
         if (due && patchCheckInProgress.compareAndSet(false, true)) {
             try {
                 String observed = observeCurrentPatch();
@@ -394,10 +409,18 @@ public final class L2CachingGateway implements AutoCloseable {
                             l2PatchBust.incrementAndGet();
                         }
                     }
-                    // Only record the timestamp on a successful observe. A transient failure
-                    // (observed == null) must leave the timer untouched so the next request
-                    // retries, rather than suppressing checks for the full patchCheckMillis window.
                     lastPatchCheckMillis = now;
+                    lastPatchCheckFailed = false;
+                } else {
+                    // Transient failure to observe (e.g. the /constants/patch fetch failed). Stamp the
+                    // attempt with the failure backoff rather than leaving the timer untouched: otherwise a
+                    // sustained outage plus steady patch-scoped traffic re-fetches on essentially every
+                    // request. The next check is due after PATCH_CHECK_FAILURE_BACKOFF_MILLIS, not never.
+                    // Re-read the clock AFTER the (possibly slow, timeout-length) observe so the backoff
+                    // window starts when the failed attempt finished, not when it began — otherwise a
+                    // fetch that blocks longer than the backoff would elapse the window instantly.
+                    lastPatchCheckMillis = System.currentTimeMillis();
+                    lastPatchCheckFailed = true;
                 }
                 return observed != null ? observed : stored;
             } catch (SQLException ex) {

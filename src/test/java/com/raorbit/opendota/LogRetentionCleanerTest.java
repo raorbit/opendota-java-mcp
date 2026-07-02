@@ -28,7 +28,8 @@ class LogRetentionCleanerTest {
         // Unrelated file -> kept (doesn't match the glob at all).
         Path unrelated = stampedLog(dir, "other.log", cutoff.minus(10, ChronoUnit.DAYS));
 
-        int deleted = LogRetentionCleaner.purge(dir, "opendota-mcp-${PID}.log", "100", cutoff);
+        // No candidate PID is a live process, so the age/pid rules alone decide.
+        int deleted = LogRetentionCleaner.purge(dir, "opendota-mcp-${PID}.log", "100", cutoff, pid -> false);
 
         assertThat(deleted).isEqualTo(1);
         assertThat(oldOrphan).doesNotExist();
@@ -36,6 +37,23 @@ class LogRetentionCleanerTest {
         assertThat(recentOrphan).exists();
         assertThat(legacy).exists();
         assertThat(unrelated).exists();
+    }
+
+    @Test
+    void purgeKeepsAnOldOrphanWhosePidIsStillAliveOnThisMachine(@TempDir Path dir) throws Exception {
+        Instant cutoff = Instant.now().minus(7, ChronoUnit.DAYS);
+        // Two old orphans from other PIDs. PID 200's process is still alive (a second app instance left
+        // this chat idle for >7d): it must be KEPT — deleting it would unlink the inode that live process
+        // still logs to. PID 201 is dead and must be deleted, proving the guard is selective, not blanket.
+        Path liveSibling = stampedLog(dir, "opendota-mcp-200.log", cutoff.minus(10, ChronoUnit.DAYS));
+        Path deadOrphan = stampedLog(dir, "opendota-mcp-201.log", cutoff.minus(10, ChronoUnit.DAYS));
+
+        int deleted = LogRetentionCleaner.purge(dir, "opendota-mcp-${PID}.log", "100", cutoff,
+                "200"::equals);
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(liveSibling).exists();
+        assertThat(deadOrphan).doesNotExist();
     }
 
     @Test
@@ -50,7 +68,7 @@ class LogRetentionCleanerTest {
         // A genuine old orphan alongside them -> still deleted, proving the guard is selective.
         Path oldOrphan = stampedLog(dir, "opendota-mcp-200.log", cutoff.minus(1, ChronoUnit.DAYS));
 
-        int deleted = LogRetentionCleaner.purge(dir, "opendota-mcp-${PID}.log", "100", cutoff);
+        int deleted = LogRetentionCleaner.purge(dir, "opendota-mcp-${PID}.log", "100", cutoff, pid -> false);
 
         assertThat(deleted).isEqualTo(1);
         assertThat(oldOrphan).doesNotExist();

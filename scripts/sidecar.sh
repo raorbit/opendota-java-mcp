@@ -18,7 +18,18 @@ PID_FILE="$RUN_DIR/sidecar.pid"
 LOG_FILE="$RUN_DIR/sidecar.log"
 PORT="${OPENDOTA_SIDECAR_PORT:-31337}"
 
-is_running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
+# True only if the recorded PID is a LIVE process that is actually our sidecar JVM — not a stale PID the
+# OS has recycled for an unrelated program after a reboot or an unclean exit. Without the identity check,
+# `stop` could SIGKILL that innocent process and `start`/`status` would falsely report "already running".
+# Matches the jar name in the process's command line; if `ps` can't confirm it, treat it as not-running
+# (the safe direction — never signal a process we can't verify is ours).
+is_running() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid; pid="$(cat "$PID_FILE" 2>/dev/null)"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  ps -p "$pid" -o args= 2>/dev/null | grep -q 'opendota-sidecar'
+}
 
 start() {
   if is_running; then

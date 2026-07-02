@@ -289,6 +289,27 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- Transient patch-check failure backs off instead of re-fetching every request ----
+    @Test
+    void transientPatchCheckFailureBacksOffInsteadOfRefetchingEveryRequest(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // No patch override, and /constants/patch is deliberately NOT stubbed, so observeCurrentPatch()
+        // 404s -> null (a transient upstream failure). Only /heroes is served.
+        CountingClient client = new CountingClient().with("/heroes", HEROES_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
+            // Three patch-scoped requests in quick succession, well within the failure backoff window.
+            gw.get("/heroes");
+            gw.get("/heroes");
+            gw.get("/heroes");
+            // The patch fetch was attempted exactly ONCE, not once per request: after the first failure the
+            // gateway stamps a short backoff rather than re-fetching /constants/patch on every request
+            // (which, during a real outage, would burn a rate-limiter permit each time).
+            long patchFetches = client.requested.stream().filter("/constants/patch"::equals).count();
+            assertThat(patchFetches).isEqualTo(1);
+        }
+    }
+
     // ---- Gate 5: per-row stale patch_id is treated as a miss ----
     @Test
     void perRowStalePatchIdIsTreatedAsMiss(@TempDir Path tmp) throws Exception {
