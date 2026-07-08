@@ -402,6 +402,25 @@ public final class L2CachingGateway implements AutoCloseable {
             }
         }
 
+        // A body larger than its whole byte budget can never be retained: enforceCaps evicts
+        // oldest-first and the fresh row is the newest, so storing it would wipe every OTHER row in
+        // its class (the entire tier, or the whole watched archive) before the oversized row itself
+        // goes — repeating on each access. L1's TtlCache refuses such entries; mirror that here.
+        // PINNED is measured against the watched byte budget (0 = unlimited), everything else
+        // against the main byte cap.
+        long budget = storeClass == Classification.PINNED
+                ? (config.watchedMaxBytes() > 0 ? config.watchedMaxBytes() : Long.MAX_VALUE)
+                : config.maxBytes();
+        if (L2Store.utf8Len(body) > budget) {
+            LOG.warning(() -> "L2 skipping " + path + ": body of " + L2Store.utf8Len(body)
+                    + " bytes exceeds the whole " + budget + "-byte cache budget (storing it would"
+                    + " evict everything else); raise "
+                    + (storeClass == Classification.PINNED
+                            ? "OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES" : "OPENDOTA_SIDECAR_L2_MAX_BYTES")
+                    + " if this body should be cacheable");
+            return;
+        }
+
         // Collapse a burst of concurrent single-flight misses for the same path into ONE write: the
         // upstream call was already shared, so re-INSERTing the identical row (and bumping l2Store)
         // once per caller is pure churn on the serialized write connection. Applies to both classes.

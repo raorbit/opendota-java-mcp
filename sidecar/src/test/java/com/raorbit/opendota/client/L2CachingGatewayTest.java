@@ -651,6 +651,54 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- Gate 9b: a body larger than the WHOLE byte budget is skipped, never allowed to wipe the tier ----
+    @Test
+    void oversizedBodyIsSkippedNotAllowedToWipeTheTier(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        String small = "{\"r\":1}";
+        String huge = "{\"rows\":\"" + "x".repeat(300) + "\"}";   // > the whole 256-byte budget below
+        CountingClient client = new CountingClient()
+                .with("/benchmarks?hero_id=1", small)
+                .with("/benchmarks?hero_id=2", huge);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, 50_000, 256L, null))) {
+            gw.get("/benchmarks?hero_id=1");
+            assertThat(store.get("/benchmarks?hero_id=1")).isNotNull();
+
+            // Without the guard, storing the huge (newest) row would drive the oldest-first byte-cap
+            // loop through every OTHER row and then the huge row itself — an empty tier. The body is
+            // still served; it just isn't stored.
+            assertThat(gw.get("/benchmarks?hero_id=2")).isEqualTo(huge);
+            assertThat(store.get("/benchmarks?hero_id=2")).as("oversized body never stored").isNull();
+            assertThat(store.get("/benchmarks?hero_id=1")).as("the rest of the tier survives").isNotNull();
+        }
+    }
+
+    // ---- W7b: same guard for the watched archive (a single huge match must not zero the archive) ----
+    @Test
+    void oversizedWatchedBodyIsSkippedNotAllowedToWipeTheArchive(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        String smallWatched = watchedParsed(701);
+        String hugeWatched = "{\"match_id\":702,\"version\":21,\"od_data\":{\"has_parsed\":true},"
+                + "\"objectives\":[{\"type\":\"tower\"}],\"players\":[{\"account_id\":12345,\"log\":\""
+                + "x".repeat(600) + "\"}]}";   // > the whole 400-byte watched budget below
+        CountingClient client = new CountingClient()
+                .with("/matches/701", smallWatched)
+                .with("/matches/702", hugeWatched);
+        L2Config.Watched watched = new L2Config.Watched(java.util.Set.of(WATCHED_ID), 0, 400);
+        L2Config cfg = new L2Config(db, 50_000, 512L * 1024 * 1024, Duration.ofHours(6).toMillis(), null, 4, watched);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, cfg)) {
+            gw.get("/matches/701");
+            assertThat(store.get("/matches/701")).isNotNull();
+
+            assertThat(gw.get("/matches/702")).isEqualTo(hugeWatched);
+            assertThat(store.get("/matches/702")).as("oversized watched body never stored").isNull();
+            assertThat(store.get("/matches/701")).as("the archive survives").isNotNull();
+            assertThat(gw.stats().pinnedRows()).isEqualTo(1);
+        }
+    }
+
     // ---- Gate 10: SQLite error is non-fatal ----
     @Test
     void sqliteErrorIsNonFatalAndDegradesToPassthrough(@TempDir Path tmp) throws Exception {

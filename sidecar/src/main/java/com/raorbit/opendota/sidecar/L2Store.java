@@ -217,8 +217,12 @@ public final class L2Store implements AutoCloseable {
         }
     }
 
-    /** UTF-8 byte length of a body — matches SQLite {@code LENGTH(CAST(body AS BLOB))} and TtlCache. */
-    private static long utf8Len(String s) {
+    /**
+     * UTF-8 byte length of a body — matches SQLite {@code LENGTH(CAST(body AS BLOB))} and TtlCache.
+     * Package-private so {@link L2CachingGateway}'s oversized-body store guard measures a body the
+     * same way the caps it is compared against are accounted.
+     */
+    static long utf8Len(String s) {
         return s.getBytes(StandardCharsets.UTF_8).length;
     }
 
