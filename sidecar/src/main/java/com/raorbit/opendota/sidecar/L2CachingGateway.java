@@ -93,6 +93,14 @@ public final class L2CachingGateway implements AutoCloseable {
     private static final long PATCH_CHECK_FAILURE_BACKOFF_MILLIS = 60_000L;
     /** Last time (epoch millis) a patch check was attempted; {@code 0} means never. */
     private volatile long lastPatchCheckMillis;
+    /**
+     * When the last real patch transition busted the store ({@code 0} = never). A bust invalidates
+     * only L2 — the wrapped client's L1 {@link com.raorbit.opendota.client.TtlCache} may keep serving
+     * pre-patch static bodies for up to their TTL — so {@link #maybeStore} refuses to store a
+     * patch-scoped row until that horizon has elapsed since the bust; otherwise a pre-patch body
+     * would be re-stored stamped with the NEW patch id and pinned for the whole cycle.
+     */
+    private volatile long lastPatchBustMillis;
     /** Whether the last attempt failed to observe a patch id, so the next check uses the shorter failure backoff. */
     private volatile boolean lastPatchCheckFailed;
     /** Guards a single in-flight patch check so concurrent PERMANENT requests don't all check at once. */
@@ -302,6 +310,15 @@ public final class L2CachingGateway implements AutoCloseable {
                 // data. Skip the store; the next request re-fetches once the patch id resolves.
                 return;
             }
+            if (patchScoped && withinPostBustL1Window(path, now)) {
+                // patchBust() only cleared L2; the delegate fetch may have been served by the client's
+                // still-valid L1 cache, i.e. a PRE-patch body. Storing it now would stamp stale data
+                // with the NEW patch id (sailing past the per-row guard) and pin it for the entire
+                // patch cycle. Skip stores until the L1 horizon for this path has fully elapsed since
+                // the bust — requests are still served meanwhile, and the first store after the window
+                // is guaranteed post-patch.
+                return;
+            }
             boolean isMatch = MATCH_ID.matcher(stripQuery(path)).matches();
             boolean parsed = !isMatch || isParsedMatch(body);
             boolean watched = isMatch && watchedPattern != null && watchedPattern.matcher(body).find();
@@ -369,6 +386,15 @@ public final class L2CachingGateway implements AutoCloseable {
         }
     }
 
+    /**
+     * Whether a pre-bust L1 body could still be alive for this patch-scoped {@code path}: true while
+     * less than {@code ttlFor(path)} has elapsed since the last real patch bust (see {@link #maybeStore}).
+     */
+    private boolean withinPostBustL1Window(String path, long now) {
+        long bustAt = lastPatchBustMillis;
+        return bustAt != 0L && (now - bustAt) < client.ttlFor(path).toMillis();
+    }
+
     /** Bring the store within both caps, atomically inside the store monitor (best-effort, spec §6.4). */
     private void enforceCaps() {
         try {
@@ -407,6 +433,12 @@ public final class L2CachingGateway implements AutoCloseable {
                         store.storePatchId(observed);
                         if (deleted > 0) {
                             l2PatchBust.incrementAndGet();
+                        }
+                        if (stored != null) {
+                            // A REAL patch transition (not the first-ever stamp of a fresh store):
+                            // remember when it happened so maybeStore holds off patch-scoped stores
+                            // while the client's L1 may still serve pre-patch bodies.
+                            lastPatchBustMillis = System.currentTimeMillis();
                         }
                     }
                     lastPatchCheckMillis = now;

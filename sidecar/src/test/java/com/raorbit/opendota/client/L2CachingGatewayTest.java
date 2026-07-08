@@ -289,6 +289,39 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- Gate 4b: a body fetched right after a patch bust is NOT stored under the new patch id ----
+    @Test
+    void postBustFetchIsNotStoredWhileL1MayStillServePrePatchBody(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // Patch A: /constants/items is stored, stamped A.
+        CountingClient clientA = new CountingClient().with("/constants/items", ITEMS_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(clientA, store, config(db, 50_000, 512L * 1024 * 1024, "A"))) {
+            gw.get("/constants/items");
+            assertThat(store.get("/constants/items")).isNotNull();
+        }
+
+        // Patch B: the bust clears L2, but the wrapped client's L1 TtlCache (simulated here by the
+        // canned body, which still holds the PRE-patch items) keeps answering for up to its 6h TTL.
+        // Storing that answer would stamp patch-A data with patch id B and pin it for the whole
+        // cycle — the store must be skipped until the L1 horizon has elapsed since the bust.
+        CountingClient clientB = new CountingClient().with("/constants/items", ITEMS_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(clientB, store, config(db, 50_000, 512L * 1024 * 1024, "B"))) {
+            // Triggers the check+bust, misses L2, fetches the (possibly pre-patch) body — served, not stored.
+            assertThat(gw.get("/constants/items")).isEqualTo(ITEMS_BODY);
+            assertThat(gw.stats().l2PatchBust()).isEqualTo(1);
+            assertThat(store.get("/constants/items"))
+                    .as("no patch-scoped store within ttlFor(/constants/) of the bust")
+                    .isNull();
+
+            // A NON-patch-scoped path is unaffected by the hold-off window.
+            clientB.bodies.put(BENCHMARKS, BENCHMARKS_BODY);
+            gw.get(BENCHMARKS);
+            assertThat(store.get(BENCHMARKS)).isNotNull();
+        }
+    }
+
     // ---- Transient patch-check failure backs off instead of re-fetching every request ----
     @Test
     void transientPatchCheckFailureBacksOffInsteadOfRefetchingEveryRequest(@TempDir Path tmp) throws Exception {
