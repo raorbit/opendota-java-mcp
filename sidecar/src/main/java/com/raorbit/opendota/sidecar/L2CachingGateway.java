@@ -191,6 +191,12 @@ public final class L2CachingGateway implements AutoCloseable {
             // rather than failing the request. Any other miss (no stored row) re-throws unchanged.
             L2Store.Entry stale = stalePinned(path);
             if (stale != null) {
+                // Advance the row's re-fetch stamp before serving: the failed fetch never reaches
+                // maybeStore, so without this the elapsed stamp stays elapsed and EVERY access for
+                // the rest of the outage re-pays the full upstream timeout + retries + a rate-limit
+                // permit — defeating the documented at-most-once-per-interval bound exactly when
+                // the archive is supposed to ride out the outage.
+                advanceRefetchStampAfterFailure(path, stale);
                 l2Hit.incrementAndGet();
                 return stale.body();
             }
@@ -258,6 +264,36 @@ public final class L2CachingGateway implements AutoCloseable {
             recordError("L2 stale read", path, ex);
         }
         return null;
+    }
+
+    /**
+     * Shortest gap between upgrade attempts of an outage-served PINNED row. Shorter than the normal
+     * {@code watchedRefetchMillis} so the parsed-body upgrade is retried soon after the outage ends,
+     * but long enough that a dead upstream is not re-paid on every access. Capped by the configured
+     * interval so a smaller {@code watchedRefetchMillis} is never lengthened.
+     */
+    private static final long WATCHED_REFETCH_FAILURE_BACKOFF_MILLIS = 60_000L;
+
+    /**
+     * Re-store an outage-served PINNED row with a fresh (failure-backoff) re-fetch stamp, so accesses
+     * within the window serve from L2 instead of re-attempting the failed upstream fetch. A {@code 0}
+     * {@code watchedRefetchMillis} means the operator opted into re-fetch-on-every-access; that choice
+     * is honoured even during an outage. Best-effort: an L2 write error is counted and ignored (the
+     * next access just retries upstream). {@code put} keeps the row's original archive time on a
+     * PINNED→PINNED overwrite, so this never disturbs eviction order.
+     */
+    private void advanceRefetchStampAfterFailure(String path, L2Store.Entry stale) {
+        long refetchMs = config.watchedRefetchMillis();
+        if (refetchMs <= 0) {
+            return;
+        }
+        long backoff = Math.min(WATCHED_REFETCH_FAILURE_BACKOFF_MILLIS, refetchMs);
+        try {
+            store.put(path, stale.body(), Classification.PINNED, stale.storedAt(),
+                    System.currentTimeMillis() + backoff, L2Store.SCHEMA_VERSION, null);
+        } catch (SQLException ex) {
+            recordError("L2 outage re-stamp", path, ex);
+        }
     }
 
     /** Delete a PINNED row whose player is no longer watched (best-effort; an L2 error is a no-op). */

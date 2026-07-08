@@ -821,6 +821,35 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- W2b2: the outage-serve advances the re-fetch stamp so the outage isn't re-paid per access ----
+    @Test
+    void outageServeAdvancesRefetchStampSoUpstreamIsNotHammered(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        long interval = Duration.ofHours(1).toMillis();
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID), interval))) {
+            // Archive the unparsed match, then expire its re-fetch stamp so the next access is "due".
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            L2Store.Entry stamped = store.get("/matches/777");
+            store.put("/matches/777", WATCHED_MATCH_UNPARSED, com.raorbit.opendota.sidecar.Classification.PINNED,
+                    stamped.storedAt(), 1L, L2Store.SCHEMA_VERSION, null);
+
+            // Upstream goes down. The due re-fetch fails and the archive serves the retained body...
+            client.bodies.remove("/matches/777");
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            int callsAfterFirstOutageServe = client.calls.get();
+            // ...and the stamp was advanced, so accesses during the rest of the outage serve straight
+            // from L2 instead of re-paying the full upstream attempt each time (the documented
+            // at-most-once-per-interval bound must hold during an outage too).
+            assertThat(store.get("/matches/777").expiresAt()).isGreaterThan(System.currentTimeMillis());
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(client.calls.get()).as("no further upstream attempts within the backoff window")
+                    .isEqualTo(callsAfterFirstOutageServe);
+        }
+    }
+
     // ---- W2c: a positive re-fetch interval serves an unparsed pinned match from L2 between re-checks ----
     @Test
     void unparsedPinnedBacksOffBetweenReFetchesThenUpgradesWhenDue(@TempDir Path tmp) throws Exception {
