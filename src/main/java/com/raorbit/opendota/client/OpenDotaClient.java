@@ -27,8 +27,7 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>Backed by a single shared {@link HttpClient}, a token-bucket
  * {@link RateLimiter} sized to the OpenDota free/keyed tiers, and a
- * {@link TtlCache} of recent responses. The public method signatures are frozen
- * (the WP1 surface); only the bodies are real here.
+ * {@link TtlCache} of recent responses.
  *
  * <p>The API key (when supplied) is treated as a secret: it is appended to the
  * outgoing URL only, and never logged, never included in exception messages,
@@ -37,7 +36,7 @@ import java.util.concurrent.TimeoutException;
 public class OpenDotaClient implements AutoCloseable {
 
     private static final String DEFAULT_BASE = "https://api.opendota.com/api";
-    private static final String USER_AGENT = "opendota-mcp/1.0.0";
+    private static final String USER_AGENT = "opendota-mcp/1.2.0";
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);

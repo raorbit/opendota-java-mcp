@@ -466,9 +466,11 @@ watchedMaxBytes, now)`:
   `pinnedRows` / `pinnedBytes`; `0` (unlimited) is skipped. When a positive watched cap is exceeded,
   the **oldest** archived matches evict first (by `stored_at`), only against this budget.
 
-`evictExpired` (matches `expires_at IS NOT NULL`) and `patchBust` (`classification = 'PERMANENT'`)
-both leave PINNED rows untouched by construction — pinned rows have a NULL `expires_at` and a
-distinct classification. **No `SCHEMA_VERSION` bump** is needed (the `classification` column is
+`evictExpired` and `patchBust` both leave PINNED rows untouched **by their explicit classification
+clauses** (`classification != 'PINNED'` and `classification = 'PERMANENT'` respectively) — *not* by
+`expires_at`: an **unparsed** pinned row carries a non-null `expires_at` as its re-fetch stamp
+(§6.5), and only a *parsed* pinned row has `expires_at = NULL`, so the classification guard is what
+protects the archive. **No `SCHEMA_VERSION` bump** is needed (the `classification` column is
 free-form TEXT). The store maintains O(1) running `pinnedRows`/`pinnedBytes` totals (seeded on open
 from a `classification = 'PINNED'` COUNT/SUM and maintained in `put`/`evictOldestPinned`, exactly
 like the global totals), so `enforceCaps` stays scan-free on the request path.
