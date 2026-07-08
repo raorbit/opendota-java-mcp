@@ -162,10 +162,16 @@ class SidecarHttpServerTest {
         // A spoofed (non-loopback) Host is refused with 403 and never reaches the upstream...
         assertThat(rawRequest("GET", "/api/heroes", "evil.example.com")).isEqualTo(403);
         assertThat(upstreamHits.get()).isZero();
-        // ...while genuine loopback Hosts are served.
+        // ...while genuine loopback Hosts are served — including the bracketed IPv6 literal forms,
+        // pinning both the "::1" LOOPBACK_HOSTS membership and hostOnly()'s bracket/port stripping.
         assertThat(rawRequest("GET", "/api/heroes", "127.0.0.1:" + sidecar.port())).isEqualTo(200);
         assertThat(rawRequest("GET", "/api/heroes", "localhost")).isEqualTo(200);
-        // /heroes is cacheable, so the two allowed reads collapse to a single upstream fetch.
+        assertThat(rawRequest("GET", "/api/heroes", "[::1]:" + sidecar.port())).isEqualTo(200);
+        assertThat(rawRequest("GET", "/api/heroes", "[::1]")).isEqualTo(200);
+        // An UNbracketed IPv6 Host is malformed per RFC 7230 (the port separator is ambiguous), so it
+        // is rejected rather than special-cased.
+        assertThat(rawRequest("GET", "/api/heroes", "::1")).isEqualTo(403);
+        // /heroes is cacheable, so the allowed reads collapse to a single upstream fetch.
         assertThat(upstreamHits.get()).isEqualTo(1);
     }
 
@@ -228,6 +234,12 @@ class SidecarHttpServerTest {
         assertThat(rawRequest("GET", "/api/players/%2e%2e/%2e%2e/admin", host)).isEqualTo(404);
         assertThat(rawRequest("GET", "/api/players/%2E%2E/records", host)).isEqualTo(404);
         assertThat(rawRequest("GET", "/api/players/..%2f..%2fadmin", host)).isEqualTo(404);
+        // The encoded backslash separator (Windows-style traversal a normalizing upstream could
+        // collapse) and the encoded percent (which would smuggle a DOUBLE-encoded traversal through
+        // one round of upstream decoding) are rejected too, upper- and lower-case.
+        assertThat(rawRequest("GET", "/api/players/..%5c..%5cadmin", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/..%5C..%5Cadmin", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/%252e%252e/admin", host)).isEqualTo(404);
         assertThat(upstreamHits.get()).isZero();
     }
 
