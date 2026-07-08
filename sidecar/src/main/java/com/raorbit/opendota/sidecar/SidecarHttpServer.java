@@ -14,6 +14,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * An HTTP front end for a single shared {@link OpenDotaClient}.
@@ -54,6 +55,13 @@ public final class SidecarHttpServer implements AutoCloseable {
      * anti-DNS-rebinding guard (see {@link #hostAllowed}). Compared as literals, never DNS-resolved.
      */
     private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "::1");
+    /**
+     * A literal IPv4 loopback address ({@code 127.x.y.z}) — matched textually, never resolved. Accepted
+     * alongside {@link #LOOPBACK_HOSTS} because {@code SidecarMain.requiresToken} lets the sidecar bind
+     * any {@code 127.0.0.0/8} address token-less; without this, a sidecar bound to e.g. {@code 127.0.0.2}
+     * would start fine and then 403 its own agents' Host headers.
+     */
+    private static final Pattern LOOPBACK_IPV4 = Pattern.compile("127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}");
     /**
      * Coarse wire-contract version, surfaced on {@code /health} and {@code /stats} so an operator can spot
      * a sidecar running a different build than its agents. Bump only on a wire-contract change.
@@ -308,7 +316,8 @@ public final class SidecarHttpServer implements AutoCloseable {
         if (host == null || host.isBlank()) {
             return false;   // HTTP/1.1 mandates Host; a local agent always sends one.
         }
-        return LOOPBACK_HOSTS.contains(hostOnly(host));
+        String h = hostOnly(host);
+        return LOOPBACK_HOSTS.contains(h) || LOOPBACK_IPV4.matcher(h).matches();
     }
 
     /**

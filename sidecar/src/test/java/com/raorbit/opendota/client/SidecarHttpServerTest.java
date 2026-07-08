@@ -168,6 +168,12 @@ class SidecarHttpServerTest {
         assertThat(rawRequest("GET", "/api/heroes", "localhost")).isEqualTo(200);
         assertThat(rawRequest("GET", "/api/heroes", "[::1]:" + sidecar.port())).isEqualTo(200);
         assertThat(rawRequest("GET", "/api/heroes", "[::1]")).isEqualTo(200);
+        // Any literal 127/8 address is loopback (requiresToken lets the sidecar BIND any of them
+        // token-less, so its own agents' Host headers must be accepted)...
+        assertThat(rawRequest("GET", "/api/heroes", "127.0.0.2:" + sidecar.port())).isEqualTo(200);
+        // ...but only as a full dotted-quad literal — hostNAMES under a 127. label stay rejected.
+        assertThat(rawRequest("GET", "/api/heroes", "127.evil.example.com")).isEqualTo(403);
+        assertThat(rawRequest("GET", "/api/heroes", "127.0.0.1.evil.example.com")).isEqualTo(403);
         // An UNbracketed IPv6 Host is malformed per RFC 7230 (the port separator is ambiguous), so it
         // is rejected rather than special-cased.
         assertThat(rawRequest("GET", "/api/heroes", "::1")).isEqualTo(403);
