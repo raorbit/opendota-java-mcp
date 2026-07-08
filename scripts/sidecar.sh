@@ -21,14 +21,23 @@ PORT="${OPENDOTA_SIDECAR_PORT:-31337}"
 # True only if the recorded PID is a LIVE process that is actually our sidecar JVM — not a stale PID the
 # OS has recycled for an unrelated program after a reboot or an unclean exit. Without the identity check,
 # `stop` could SIGKILL that innocent process and `start`/`status` would falsely report "already running".
-# Matches the jar name in the process's command line; if `ps` can't confirm it, treat it as not-running
-# (the safe direction — never signal a process we can't verify is ours).
+# The identity check needs `ps -p <pid> -o args=`, which MSYS/Git Bash and busybox `ps` don't support:
+# there, "ps can't REPORT the command line" must not be read as "the command line doesn't match" — that
+# misread returned not-running for a live sidecar, so `stop` deleted the pid file and orphaned the JVM
+# (port held, key loaded) and the next start died on BindException. When ps can't report, degrade to the
+# liveness check alone; when it can, a non-matching command line still counts as not ours (never signal
+# a process we can verify isn't ours).
 is_running() {
   [ -f "$PID_FILE" ] || return 1
   local pid; pid="$(cat "$PID_FILE" 2>/dev/null)"
   [ -n "$pid" ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  ps -p "$pid" -o args= 2>/dev/null | grep -q 'opendota-sidecar'
+  local args
+  if args="$(ps -p "$pid" -o args= 2>/dev/null)" && [ -n "$args" ]; then
+    printf '%s\n' "$args" | grep -q 'opendota-sidecar'
+  else
+    return 0   # alive, and ps can't report the command line here (MSYS/busybox) — trust liveness
+  fi
 }
 
 start() {
