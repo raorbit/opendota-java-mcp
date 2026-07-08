@@ -18,10 +18,13 @@ import org.springframework.core.env.Environment;
  * profile (activated by {@code spring.profiles.active=http}, which also loads
  * {@code application-http.properties}); the whole class is inert in the default stdio build.
  *
- * <p>It does two things:
+ * <p>It does three things:
  * <ul>
  *   <li>Registers {@link BearerAuthFilter} (when {@code opendota.http.auth-mode=bearer}) at
  *       highest precedence so the MCP endpoint is bearer-gated.</li>
+ *   <li>Registers {@link HostGuardFilter} (when {@code opendota.http.auth-mode=none}) so the
+ *       otherwise-unvalidated loopback endpoint rejects DNS-rebinding {@code Host} headers —
+ *       Spring AI 1.1.8's Streamable-HTTP transport itself applies no Host/Origin check.</li>
  *   <li>Runs a <b>fail-closed startup guard</b>: if the server binds a non-loopback address
  *       without a bearer token, it logs and {@code System.exit(1)} before Tomcat accepts traffic
  *       — mirroring the sidecar's guard ({@code SidecarMain.requiresToken}).</li>
@@ -94,6 +97,24 @@ public class HttpMcpConfig {
     FilterRegistrationBean<BearerAuthFilter> bearerAuthFilterRegistration() {
         FilterRegistrationBean<BearerAuthFilter> registration = new FilterRegistrationBean<>();
         registration.setFilter(new BearerAuthFilter(properties.getHttp()));
+        registration.addUrlPatterns("/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
+        return registration;
+    }
+
+    /**
+     * Register the anti-DNS-rebinding Host guard when {@code opendota.http.auth-mode=none} — the
+     * one configuration with no other request-level defense (the Streamable-HTTP transport in
+     * Spring AI 1.1.8 validates nothing, and the startup guard has only ensured the bind is
+     * loopback). In bearer mode the filter is skipped: the secret already defeats a rebinding page,
+     * and the proxied public {@code Host} a tunnel forwards would trip a literal host check.
+     * Complementary to {@link #bearerAuthFilterRegistration} — exactly one of the two registers.
+     */
+    @Bean
+    @ConditionalOnProperty(name = "opendota.http.auth-mode", havingValue = "none")
+    FilterRegistrationBean<HostGuardFilter> hostGuardFilterRegistration() {
+        FilterRegistrationBean<HostGuardFilter> registration = new FilterRegistrationBean<>();
+        registration.setFilter(new HostGuardFilter(properties.getHttp()));
         registration.addUrlPatterns("/*");
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
         return registration;
