@@ -593,7 +593,7 @@ class L2CachingGatewayTest {
     @Test
     void everyTtlClassifiedPathHasPositiveTtlForHorizon() throws Exception {
         String[] ttlPaths = {
-                "/players/123", "/proMatches", "/publicMatches", "/rankings",
+                "/players/123", "/proMatches", "/publicMatches", "/rankings", "/heroStats",
                 "/search?q=x", "/benchmarks?hero_id=1", "/distributions", "/heroes/14/matches",
                 "/schema", "/proPlayers", "/topPlayers", "/teams/15", "/teams/15/matches",
                 "/teams/15/players", "/leagues/4210", "/leagues/4210/matches", "/leagues/4210/teams",

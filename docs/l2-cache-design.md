@@ -129,7 +129,7 @@ OpenDota path the sidecar already forwards (e.g. `/matches/123`, `/players/456/r
 |--------------------------------------------------------|----------------|-----------|
 | `/matches/{id}` (i.e. `/matches/` + digits, no further `/`) | **PERMANENT (parse-gated)** | A finished, fully-parsed match is immutable. Store permanently **only if parsed** (§5.1). An unparsed match stays PERMANENT-class but is **skipped** (not stored) and re-fetched next time until it parses. |
 | `/heroes`                                              | **PERMANENT (patch-scoped)** | Static hero list; changes only on a patch. Invalidated by patch bump (§5.2). |
-| `/heroStats`                                           | **PERMANENT (patch-scoped)** | Hero aggregate reference data; patch-scoped. |
+| `/heroStats`                                           | **TTL** | A *rolling* 7-day aggregate over recent matches (win rates by bracket etc.) — it drifts continuously within a patch, so it mirrors L1's 1h horizon like `/benchmarks`, never pinned for a whole patch cycle. |
 | `/constants/`                                          | **PERMANENT (patch-scoped)** | Game constants (items, abilities, patch, etc.); patch-scoped. |
 | `/players/`                                            | **TTL** | Player profiles / recent matches change as the player plays. Mirror L1 horizon. |
 | `/proMatches`                                          | **TTL** | A rolling recent-match feed. |
@@ -237,7 +237,7 @@ assume `version` is the first key. The probe operates on the already-size-capped
 (`CappedBodySubscriber` bounds it to `maxResponseBytes`), so it cannot be driven to pathological
 cost by a huge body.
 
-### 5.2 Patch-busting for static data (`/heroes`, `/heroStats`, `/constants/*`)
+### 5.2 Patch-busting for static data (`/heroes`, `/constants/*`)
 
 Matches are immutable once parsed, so PERMANENT match rows **never** need busting. The static
 reference data, however, changes when Dota ships a game patch. L2 must drop stale static rows on

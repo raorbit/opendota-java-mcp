@@ -626,9 +626,12 @@ public final class L2CachingGateway implements AutoCloseable {
         if (p.startsWith("/matches/")) {
             return MATCH_ID.matcher(p).matches() ? Classification.PERMANENT : Classification.NO_STORE;
         }
-        // Static reference data — PERMANENT (patch-scoped).
+        // /heroStats is a ROLLING 7-day aggregate over recent matches (win rates by bracket etc.),
+        // not static reference data: it drifts continuously within a patch, so it takes L1's 1h
+        // horizon durably (TTL) rather than being pinned until the next patch — matching its
+        // rolling-aggregate siblings /benchmarks and /distributions.
         if (p.startsWith("/heroStats")) {
-            return Classification.PERMANENT;
+            return Classification.TTL;
         }
         // Only the bare /heroes list is patch-scoped static data. The /heroes/{id}/* sub-endpoints
         // (matches, matchups, durations, players, itemPopularity) are rolling aggregates over recent
@@ -700,7 +703,7 @@ public final class L2CachingGateway implements AutoCloseable {
     /** Whether a PERMANENT path is patch-scoped static data (vs an immutable match). */
     private static boolean isPatchScoped(String path) {
         String p = stripQuery(path);
-        return p.startsWith("/heroStats") || p.equals("/heroes") || p.startsWith("/constants/");
+        return p.equals("/heroes") || p.startsWith("/constants/");
     }
 
     private static String stripQuery(String path) {
