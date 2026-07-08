@@ -231,6 +231,21 @@ public final class L2CachingGateway implements AutoCloseable {
             if (e.schemaVersion() != L2Store.SCHEMA_VERSION) {
                 return null;
             }
+            // A row whose STORED class no longer matches the path's current classification (a
+            // taxonomy change — e.g. /heroStats was PERMANENT, now TTL) must not keep serving under
+            // its old rules: a PERMANENT leftover has expires_at NULL and, once the path stops
+            // being patch-scoped, no guard would ever expire or replace it — a frozen snapshot
+            // served for the whole patch cycle on every pre-change database. Treat the mismatch as
+            // a miss so the body is re-fetched and re-stored under the current class (no schema
+            // bump needed, which would destroy the watched archive). PINNED is a store-time
+            // refinement of PERMANENT for /matches/{id}, so it is NOT a mismatch.
+            Classification current = classify(path);
+            boolean classConsistent = current.name().equals(e.classification())
+                    || (Classification.PINNED.name().equals(e.classification())
+                            && current == Classification.PERMANENT);
+            if (!classConsistent) {
+                return null;
+            }
             // TTL expiry: PERMANENT rows have expires_at NULL and never expire by time.
             if (e.expiresAt() != null && e.expiresAt() <= System.currentTimeMillis()) {
                 return null;

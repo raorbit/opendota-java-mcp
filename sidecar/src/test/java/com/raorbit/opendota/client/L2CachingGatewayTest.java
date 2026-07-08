@@ -322,6 +322,31 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- Gate 4c: a row stored under an OLD classification is a miss, not served under old rules ----
+    @Test
+    void rowStoredUnderOldClassificationIsMissedAndReStored(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // A pre-change database: /heroStats was PERMANENT (expires_at NULL, patch-stamped). Now that
+        // classify() says TTL, the leftover must NOT keep serving as a frozen never-expiring
+        // snapshot — no expiry predicate applies to it and the path is no longer patch-scoped, so
+        // without the class-consistency check nothing would ever refresh or evict it.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/heroStats", "{\"stale\":true}", com.raorbit.opendota.sidecar.Classification.PERMANENT,
+                    System.currentTimeMillis(), null, L2Store.SCHEMA_VERSION, "OLD");
+        }
+        CountingClient client = new CountingClient().with("/heroStats", "{\"fresh\":true}");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
+            assertThat(gw.get("/heroStats")).isEqualTo("{\"fresh\":true}");
+            assertThat(client.calls.get()).isEqualTo(1);
+            // Re-stored in place under the CURRENT class, with a real expiry.
+            L2Store.Entry e = store.get("/heroStats");
+            assertThat(e.classification()).isEqualTo("TTL");
+            assertThat(e.expiresAt()).isNotNull();
+            assertThat(store.rowCount()).isEqualTo(1);
+        }
+    }
+
     // ---- Transient patch-check failure backs off instead of re-fetching every request ----
     @Test
     void transientPatchCheckFailureBacksOffInsteadOfRefetchingEveryRequest(@TempDir Path tmp) throws Exception {
