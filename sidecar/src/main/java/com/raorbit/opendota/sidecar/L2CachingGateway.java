@@ -119,6 +119,18 @@ public final class L2CachingGateway implements AutoCloseable {
         this.autoParser = (watchedPattern != null && config.watchedAutoParse())
                 ? new WatchedAutoParser(client, config.watchedAccountIds(), config.watchedParsePollMillis())
                 : null;
+        // The patch probe reads /constants/patch THROUGH the client, so it is served from L1 for its
+        // ttlFor horizon (6h): a patch-check interval below that silently cannot observe a change any
+        // faster — the knob looks effective but detection is still floored at the L1 TTL. Warn rather
+        // than clamp (the operator override bypasses the probe entirely, so it is exempt).
+        long patchProbeL1Millis = client.ttlFor("/constants/patch").toMillis();
+        if (config.patchIdOverride() == null && config.patchCheckMillis() < patchProbeL1Millis) {
+            LOG.warning(() -> "L2 patch-check interval " + config.patchCheckMillis() + "ms is below the "
+                    + patchProbeL1Millis + "ms L1 TTL of /constants/patch, which the patch probe reads "
+                    + "through the client's cache — a patch change still takes up to " + patchProbeL1Millis
+                    + "ms to detect. Set OPENDOTA_SIDECAR_PATCH_ID to drive detection explicitly, or "
+                    + "leave the interval at/above the TTL.");
+        }
     }
 
     /**
