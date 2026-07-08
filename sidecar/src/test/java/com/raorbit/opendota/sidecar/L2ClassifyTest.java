@@ -30,8 +30,10 @@ class L2ClassifyTest {
             "/heroes/14,                           TTL",
             "/heroes/14/matches,                   TTL",
             "/heroes/14/matchups,                  TTL",
-            "/heroStats,                           PERMANENT",
-            "/heroStats?foo=1,                     PERMANENT",
+            // /heroStats is a ROLLING 7-day aggregate (drifts within a patch) -> TTL like /benchmarks,
+            // never pinned for the whole patch cycle
+            "/heroStats,                           TTL",
+            "/heroStats?foo=1,                     TTL",
             "/constants/items,                     PERMANENT",
             "/constants/patch,                     PERMANENT",
             // volatile feeds -> TTL (not stored in v1)

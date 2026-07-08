@@ -289,6 +289,64 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- Gate 4b: a body fetched right after a patch bust is NOT stored under the new patch id ----
+    @Test
+    void postBustFetchIsNotStoredWhileL1MayStillServePrePatchBody(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // Patch A: /constants/items is stored, stamped A.
+        CountingClient clientA = new CountingClient().with("/constants/items", ITEMS_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(clientA, store, config(db, 50_000, 512L * 1024 * 1024, "A"))) {
+            gw.get("/constants/items");
+            assertThat(store.get("/constants/items")).isNotNull();
+        }
+
+        // Patch B: the bust clears L2, but the wrapped client's L1 TtlCache (simulated here by the
+        // canned body, which still holds the PRE-patch items) keeps answering for up to its 6h TTL.
+        // Storing that answer would stamp patch-A data with patch id B and pin it for the whole
+        // cycle — the store must be skipped until the L1 horizon has elapsed since the bust.
+        CountingClient clientB = new CountingClient().with("/constants/items", ITEMS_BODY);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(clientB, store, config(db, 50_000, 512L * 1024 * 1024, "B"))) {
+            // Triggers the check+bust, misses L2, fetches the (possibly pre-patch) body — served, not stored.
+            assertThat(gw.get("/constants/items")).isEqualTo(ITEMS_BODY);
+            assertThat(gw.stats().l2PatchBust()).isEqualTo(1);
+            assertThat(store.get("/constants/items"))
+                    .as("no patch-scoped store within ttlFor(/constants/) of the bust")
+                    .isNull();
+
+            // A NON-patch-scoped path is unaffected by the hold-off window.
+            clientB.bodies.put(BENCHMARKS, BENCHMARKS_BODY);
+            gw.get(BENCHMARKS);
+            assertThat(store.get(BENCHMARKS)).isNotNull();
+        }
+    }
+
+    // ---- Gate 4c: a row stored under an OLD classification is a miss, not served under old rules ----
+    @Test
+    void rowStoredUnderOldClassificationIsMissedAndReStored(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        // A pre-change database: /heroStats was PERMANENT (expires_at NULL, patch-stamped). Now that
+        // classify() says TTL, the leftover must NOT keep serving as a frozen never-expiring
+        // snapshot — no expiry predicate applies to it and the path is no longer patch-scoped, so
+        // without the class-consistency check nothing would ever refresh or evict it.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION)) {
+            store.put("/heroStats", "{\"stale\":true}", com.raorbit.opendota.sidecar.Classification.PERMANENT,
+                    System.currentTimeMillis(), null, L2Store.SCHEMA_VERSION, "OLD");
+        }
+        CountingClient client = new CountingClient().with("/heroStats", "{\"fresh\":true}");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db))) {
+            assertThat(gw.get("/heroStats")).isEqualTo("{\"fresh\":true}");
+            assertThat(client.calls.get()).isEqualTo(1);
+            // Re-stored in place under the CURRENT class, with a real expiry.
+            L2Store.Entry e = store.get("/heroStats");
+            assertThat(e.classification()).isEqualTo("TTL");
+            assertThat(e.expiresAt()).isNotNull();
+            assertThat(store.rowCount()).isEqualTo(1);
+        }
+    }
+
     // ---- Transient patch-check failure backs off instead of re-fetching every request ----
     @Test
     void transientPatchCheckFailureBacksOffInsteadOfRefetchingEveryRequest(@TempDir Path tmp) throws Exception {
@@ -560,7 +618,7 @@ class L2CachingGatewayTest {
     @Test
     void everyTtlClassifiedPathHasPositiveTtlForHorizon() throws Exception {
         String[] ttlPaths = {
-                "/players/123", "/proMatches", "/publicMatches", "/rankings",
+                "/players/123", "/proMatches", "/publicMatches", "/rankings", "/heroStats",
                 "/search?q=x", "/benchmarks?hero_id=1", "/distributions", "/heroes/14/matches",
                 "/schema", "/proPlayers", "/topPlayers", "/teams/15", "/teams/15/matches",
                 "/teams/15/players", "/leagues/4210", "/leagues/4210/matches", "/leagues/4210/teams",
@@ -615,6 +673,54 @@ class L2CachingGatewayTest {
             assertThat(store.get("/matches/1")).isNull();
             assertThat(store.get("/matches/2")).isNull();
             assertThat(store.get("/matches/5")).isNotNull();
+        }
+    }
+
+    // ---- Gate 9b: a body larger than the WHOLE byte budget is skipped, never allowed to wipe the tier ----
+    @Test
+    void oversizedBodyIsSkippedNotAllowedToWipeTheTier(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        String small = "{\"r\":1}";
+        String huge = "{\"rows\":\"" + "x".repeat(300) + "\"}";   // > the whole 256-byte budget below
+        CountingClient client = new CountingClient()
+                .with("/benchmarks?hero_id=1", small)
+                .with("/benchmarks?hero_id=2", huge);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, 50_000, 256L, null))) {
+            gw.get("/benchmarks?hero_id=1");
+            assertThat(store.get("/benchmarks?hero_id=1")).isNotNull();
+
+            // Without the guard, storing the huge (newest) row would drive the oldest-first byte-cap
+            // loop through every OTHER row and then the huge row itself — an empty tier. The body is
+            // still served; it just isn't stored.
+            assertThat(gw.get("/benchmarks?hero_id=2")).isEqualTo(huge);
+            assertThat(store.get("/benchmarks?hero_id=2")).as("oversized body never stored").isNull();
+            assertThat(store.get("/benchmarks?hero_id=1")).as("the rest of the tier survives").isNotNull();
+        }
+    }
+
+    // ---- W7b: same guard for the watched archive (a single huge match must not zero the archive) ----
+    @Test
+    void oversizedWatchedBodyIsSkippedNotAllowedToWipeTheArchive(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        String smallWatched = watchedParsed(701);
+        String hugeWatched = "{\"match_id\":702,\"version\":21,\"od_data\":{\"has_parsed\":true},"
+                + "\"objectives\":[{\"type\":\"tower\"}],\"players\":[{\"account_id\":12345,\"log\":\""
+                + "x".repeat(600) + "\"}]}";   // > the whole 400-byte watched budget below
+        CountingClient client = new CountingClient()
+                .with("/matches/701", smallWatched)
+                .with("/matches/702", hugeWatched);
+        L2Config.Watched watched = new L2Config.Watched(java.util.Set.of(WATCHED_ID), 0, 400);
+        L2Config cfg = new L2Config(db, 50_000, 512L * 1024 * 1024, Duration.ofHours(6).toMillis(), null, 4, watched);
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, cfg)) {
+            gw.get("/matches/701");
+            assertThat(store.get("/matches/701")).isNotNull();
+
+            assertThat(gw.get("/matches/702")).isEqualTo(hugeWatched);
+            assertThat(store.get("/matches/702")).as("oversized watched body never stored").isNull();
+            assertThat(store.get("/matches/701")).as("the archive survives").isNotNull();
+            assertThat(gw.stats().pinnedRows()).isEqualTo(1);
         }
     }
 
@@ -785,6 +891,35 @@ class L2CachingGatewayTest {
 
             // A non-archived path with no stored row still propagates the upstream error.
             assertThatThrownBy(() -> gw.get("/matches/999")).isInstanceOf(OpenDotaException.class);
+        }
+    }
+
+    // ---- W2b2: the outage-serve advances the re-fetch stamp so the outage isn't re-paid per access ----
+    @Test
+    void outageServeAdvancesRefetchStampSoUpstreamIsNotHammered(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        long interval = Duration.ofHours(1).toMillis();
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID), interval))) {
+            // Archive the unparsed match, then expire its re-fetch stamp so the next access is "due".
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            L2Store.Entry stamped = store.get("/matches/777");
+            store.put("/matches/777", WATCHED_MATCH_UNPARSED, com.raorbit.opendota.sidecar.Classification.PINNED,
+                    stamped.storedAt(), 1L, L2Store.SCHEMA_VERSION, null);
+
+            // Upstream goes down. The due re-fetch fails and the archive serves the retained body...
+            client.bodies.remove("/matches/777");
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            int callsAfterFirstOutageServe = client.calls.get();
+            // ...and the stamp was advanced, so accesses during the rest of the outage serve straight
+            // from L2 instead of re-paying the full upstream attempt each time (the documented
+            // at-most-once-per-interval bound must hold during an outage too).
+            assertThat(store.get("/matches/777").expiresAt()).isGreaterThan(System.currentTimeMillis());
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(client.calls.get()).as("no further upstream attempts within the backoff window")
+                    .isEqualTo(callsAfterFirstOutageServe);
         }
     }
 

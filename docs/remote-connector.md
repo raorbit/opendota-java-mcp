@@ -90,6 +90,7 @@ All are standard `opendota.*` / Spring properties; supply them via env
 | `spring.ai.mcp.server.streamable-http.mcp-endpoint` | — | `/mcp` | The single MCP endpoint path. |
 | `opendota.http.auth-mode` | `OPENDOTA_HTTP_AUTH_MODE` | `bearer` | `bearer` or `none`. |
 | `opendota.http.bearer-token` | `OPENDOTA_HTTP_BEARER_TOKEN` | — | Expected bearer secret (constant-time compared). Treat as a secret; never commit. |
+| `opendota.http.allowed-hosts` | `OPENDOTA_HTTP_ALLOWED_HOSTS` | — | Extra `Host` values the `auth-mode=none` anti-rebinding guard accepts (the public hostname your proxy/tunnel forwards). Literals only; ignored in bearer mode. |
 | `opendota.sidecar-enabled` | `OPENDOTA_SIDECAR_ENABLED` | `true` | Forward through the shared sidecar. |
 
 ### Authentication (bearer) and the fail-closed guard
@@ -144,10 +145,26 @@ cloudflared tunnel run <tunnel-name>
 
 Then add a **Cloudflare Access** policy on `opendota.example.com` (Zero Trust →
 Access → Applications) so only your identity/SSO can reach it. Access enforces auth at
-the edge; only approved requests are forwarded to the loopback app. Because the app is
-loopback-only and reachable solely through the authenticated tunnel, run it with
-`opendota.http.auth-mode=none` (the loopback bind satisfies the fail-closed guard), or
-keep `auth-mode=bearer` and have Access/cloudflared inject the matching header.
+the edge; only approved requests are forwarded to the loopback app. With the Access
+policy in place you can run the app with `opendota.http.auth-mode=none` (the loopback
+bind satisfies the fail-closed guard), or keep `auth-mode=bearer` and have
+Access/cloudflared inject the matching header.
+
+> **Loopback is not isolation.** A loopback bind does *not* mean the app is reachable
+> only through the tunnel: any browser on the same machine can reach `127.0.0.1:8080`,
+> and a DNS-rebinding page (an attacker hostname re-pointed at `127.0.0.1`) reaches it
+> as what the browser considers a same-origin request. In `auth-mode=none` the app
+> therefore runs an anti-rebinding **Host guard** (`HostGuardFilter`) that rejects any
+> `Host` header that is not a loopback literal. Because cloudflared forwards the
+> original public `Host` (`opendota.example.com`), you **must** allow-list it or the
+> tunnel's requests are refused with `403`:
+>
+> ```sh
+> OPENDOTA_HTTP_ALLOWED_HOSTS=opendota.example.com
+> ```
+>
+> (`opendota.http.allowed-hosts`: comma-separated literals, any `:port` ignored, never
+> DNS-resolved. `/actuator/health` stays un-gated for the tunnel's liveness probe.)
 
 > A bare `cloudflared tunnel --url http://127.0.0.1:8080` with **no** Access policy is
 > an **open** endpoint — anyone with the URL reaches `/mcp`. Always add the Access

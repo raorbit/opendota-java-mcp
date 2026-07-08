@@ -10,7 +10,7 @@ package com.raorbit.opendota.sidecar;
 public enum Classification {
     /**
      * Eligible for durable storage with no TTL expiry. A parsed match is stored forever; static
-     * reference data (heroes / heroStats / constants) is stored until the game patch changes.
+     * reference data (heroes / constants) is stored until the game patch changes.
      */
     PERMANENT,
     /**

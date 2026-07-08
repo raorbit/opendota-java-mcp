@@ -93,6 +93,14 @@ public final class L2CachingGateway implements AutoCloseable {
     private static final long PATCH_CHECK_FAILURE_BACKOFF_MILLIS = 60_000L;
     /** Last time (epoch millis) a patch check was attempted; {@code 0} means never. */
     private volatile long lastPatchCheckMillis;
+    /**
+     * When the last real patch transition busted the store ({@code 0} = never). A bust invalidates
+     * only L2 — the wrapped client's L1 {@link com.raorbit.opendota.client.TtlCache} may keep serving
+     * pre-patch static bodies for up to their TTL — so {@link #maybeStore} refuses to store a
+     * patch-scoped row until that horizon has elapsed since the bust; otherwise a pre-patch body
+     * would be re-stored stamped with the NEW patch id and pinned for the whole cycle.
+     */
+    private volatile long lastPatchBustMillis;
     /** Whether the last attempt failed to observe a patch id, so the next check uses the shorter failure backoff. */
     private volatile boolean lastPatchCheckFailed;
     /** Guards a single in-flight patch check so concurrent PERMANENT requests don't all check at once. */
@@ -111,6 +119,18 @@ public final class L2CachingGateway implements AutoCloseable {
         this.autoParser = (watchedPattern != null && config.watchedAutoParse())
                 ? new WatchedAutoParser(client, config.watchedAccountIds(), config.watchedParsePollMillis())
                 : null;
+        // The patch probe reads /constants/patch THROUGH the client, so it is served from L1 for its
+        // ttlFor horizon (6h): a patch-check interval below that silently cannot observe a change any
+        // faster — the knob looks effective but detection is still floored at the L1 TTL. Warn rather
+        // than clamp (the operator override bypasses the probe entirely, so it is exempt).
+        long patchProbeL1Millis = client.ttlFor("/constants/patch").toMillis();
+        if (config.patchIdOverride() == null && config.patchCheckMillis() < patchProbeL1Millis) {
+            LOG.warning(() -> "L2 patch-check interval " + config.patchCheckMillis() + "ms is below the "
+                    + patchProbeL1Millis + "ms L1 TTL of /constants/patch, which the patch probe reads "
+                    + "through the client's cache — a patch change still takes up to " + patchProbeL1Millis
+                    + "ms to detect. Set OPENDOTA_SIDECAR_PATCH_ID to drive detection explicitly, or "
+                    + "leave the interval at/above the TTL.");
+        }
     }
 
     /**
@@ -183,6 +203,12 @@ public final class L2CachingGateway implements AutoCloseable {
             // rather than failing the request. Any other miss (no stored row) re-throws unchanged.
             L2Store.Entry stale = stalePinned(path);
             if (stale != null) {
+                // Advance the row's re-fetch stamp before serving: the failed fetch never reaches
+                // maybeStore, so without this the elapsed stamp stays elapsed and EVERY access for
+                // the rest of the outage re-pays the full upstream timeout + retries + a rate-limit
+                // permit — defeating the documented at-most-once-per-interval bound exactly when
+                // the archive is supposed to ride out the outage.
+                advanceRefetchStampAfterFailure(path, stale);
                 l2Hit.incrementAndGet();
                 return stale.body();
             }
@@ -203,6 +229,21 @@ public final class L2CachingGateway implements AutoCloseable {
             }
             // Stale schema stamp (belt-and-braces; survives a partial rebuild) ⇒ treat as miss.
             if (e.schemaVersion() != L2Store.SCHEMA_VERSION) {
+                return null;
+            }
+            // A row whose STORED class no longer matches the path's current classification (a
+            // taxonomy change — e.g. /heroStats was PERMANENT, now TTL) must not keep serving under
+            // its old rules: a PERMANENT leftover has expires_at NULL and, once the path stops
+            // being patch-scoped, no guard would ever expire or replace it — a frozen snapshot
+            // served for the whole patch cycle on every pre-change database. Treat the mismatch as
+            // a miss so the body is re-fetched and re-stored under the current class (no schema
+            // bump needed, which would destroy the watched archive). PINNED is a store-time
+            // refinement of PERMANENT for /matches/{id}, so it is NOT a mismatch.
+            Classification current = classify(path);
+            boolean classConsistent = current.name().equals(e.classification())
+                    || (Classification.PINNED.name().equals(e.classification())
+                            && current == Classification.PERMANENT);
+            if (!classConsistent) {
                 return null;
             }
             // TTL expiry: PERMANENT rows have expires_at NULL and never expire by time.
@@ -250,6 +291,36 @@ public final class L2CachingGateway implements AutoCloseable {
             recordError("L2 stale read", path, ex);
         }
         return null;
+    }
+
+    /**
+     * Shortest gap between upgrade attempts of an outage-served PINNED row. Shorter than the normal
+     * {@code watchedRefetchMillis} so the parsed-body upgrade is retried soon after the outage ends,
+     * but long enough that a dead upstream is not re-paid on every access. Capped by the configured
+     * interval so a smaller {@code watchedRefetchMillis} is never lengthened.
+     */
+    private static final long WATCHED_REFETCH_FAILURE_BACKOFF_MILLIS = 60_000L;
+
+    /**
+     * Re-store an outage-served PINNED row with a fresh (failure-backoff) re-fetch stamp, so accesses
+     * within the window serve from L2 instead of re-attempting the failed upstream fetch. A {@code 0}
+     * {@code watchedRefetchMillis} means the operator opted into re-fetch-on-every-access; that choice
+     * is honoured even during an outage. Best-effort: an L2 write error is counted and ignored (the
+     * next access just retries upstream). {@code put} keeps the row's original archive time on a
+     * PINNED→PINNED overwrite, so this never disturbs eviction order.
+     */
+    private void advanceRefetchStampAfterFailure(String path, L2Store.Entry stale) {
+        long refetchMs = config.watchedRefetchMillis();
+        if (refetchMs <= 0) {
+            return;
+        }
+        long backoff = Math.min(WATCHED_REFETCH_FAILURE_BACKOFF_MILLIS, refetchMs);
+        try {
+            store.put(path, stale.body(), Classification.PINNED, stale.storedAt(),
+                    System.currentTimeMillis() + backoff, L2Store.SCHEMA_VERSION, null);
+        } catch (SQLException ex) {
+            recordError("L2 outage re-stamp", path, ex);
+        }
     }
 
     /** Delete a PINNED row whose player is no longer watched (best-effort; an L2 error is a no-op). */
@@ -302,6 +373,15 @@ public final class L2CachingGateway implements AutoCloseable {
                 // data. Skip the store; the next request re-fetches once the patch id resolves.
                 return;
             }
+            if (patchScoped && withinPostBustL1Window(path, now)) {
+                // patchBust() only cleared L2; the delegate fetch may have been served by the client's
+                // still-valid L1 cache, i.e. a PRE-patch body. Storing it now would stamp stale data
+                // with the NEW patch id (sailing past the per-row guard) and pin it for the entire
+                // patch cycle. Skip stores until the L1 horizon for this path has fully elapsed since
+                // the bust — requests are still served meanwhile, and the first store after the window
+                // is guaranteed post-patch.
+                return;
+            }
             boolean isMatch = MATCH_ID.matcher(stripQuery(path)).matches();
             boolean parsed = !isMatch || isParsedMatch(body);
             boolean watched = isMatch && watchedPattern != null && watchedPattern.matcher(body).find();
@@ -349,6 +429,25 @@ public final class L2CachingGateway implements AutoCloseable {
             }
         }
 
+        // A body larger than its whole byte budget can never be retained: enforceCaps evicts
+        // oldest-first and the fresh row is the newest, so storing it would wipe every OTHER row in
+        // its class (the entire tier, or the whole watched archive) before the oversized row itself
+        // goes — repeating on each access. L1's TtlCache refuses such entries; mirror that here.
+        // PINNED is measured against the watched byte budget (0 = unlimited), everything else
+        // against the main byte cap.
+        long budget = storeClass == Classification.PINNED
+                ? (config.watchedMaxBytes() > 0 ? config.watchedMaxBytes() : Long.MAX_VALUE)
+                : config.maxBytes();
+        if (L2Store.utf8Len(body) > budget) {
+            LOG.warning(() -> "L2 skipping " + path + ": body of " + L2Store.utf8Len(body)
+                    + " bytes exceeds the whole " + budget + "-byte cache budget (storing it would"
+                    + " evict everything else); raise "
+                    + (storeClass == Classification.PINNED
+                            ? "OPENDOTA_SIDECAR_L2_WATCHED_MAX_BYTES" : "OPENDOTA_SIDECAR_L2_MAX_BYTES")
+                    + " if this body should be cacheable");
+            return;
+        }
+
         // Collapse a burst of concurrent single-flight misses for the same path into ONE write: the
         // upstream call was already shared, so re-INSERTing the identical row (and bumping l2Store)
         // once per caller is pure churn on the serialized write connection. Applies to both classes.
@@ -367,6 +466,15 @@ public final class L2CachingGateway implements AutoCloseable {
         } finally {
             storing.remove(path);
         }
+    }
+
+    /**
+     * Whether a pre-bust L1 body could still be alive for this patch-scoped {@code path}: true while
+     * less than {@code ttlFor(path)} has elapsed since the last real patch bust (see {@link #maybeStore}).
+     */
+    private boolean withinPostBustL1Window(String path, long now) {
+        long bustAt = lastPatchBustMillis;
+        return bustAt != 0L && (now - bustAt) < client.ttlFor(path).toMillis();
     }
 
     /** Bring the store within both caps, atomically inside the store monitor (best-effort, spec §6.4). */
@@ -407,6 +515,12 @@ public final class L2CachingGateway implements AutoCloseable {
                         store.storePatchId(observed);
                         if (deleted > 0) {
                             l2PatchBust.incrementAndGet();
+                        }
+                        if (stored != null) {
+                            // A REAL patch transition (not the first-ever stamp of a fresh store):
+                            // remember when it happened so maybeStore holds off patch-scoped stores
+                            // while the client's L1 may still serve pre-patch bodies.
+                            lastPatchBustMillis = System.currentTimeMillis();
                         }
                     }
                     lastPatchCheckMillis = now;
@@ -539,9 +653,12 @@ public final class L2CachingGateway implements AutoCloseable {
         if (p.startsWith("/matches/")) {
             return MATCH_ID.matcher(p).matches() ? Classification.PERMANENT : Classification.NO_STORE;
         }
-        // Static reference data — PERMANENT (patch-scoped).
+        // /heroStats is a ROLLING 7-day aggregate over recent matches (win rates by bracket etc.),
+        // not static reference data: it drifts continuously within a patch, so it takes L1's 1h
+        // horizon durably (TTL) rather than being pinned until the next patch — matching its
+        // rolling-aggregate siblings /benchmarks and /distributions.
         if (p.startsWith("/heroStats")) {
-            return Classification.PERMANENT;
+            return Classification.TTL;
         }
         // Only the bare /heroes list is patch-scoped static data. The /heroes/{id}/* sub-endpoints
         // (matches, matchups, durations, players, itemPopularity) are rolling aggregates over recent
@@ -613,7 +730,7 @@ public final class L2CachingGateway implements AutoCloseable {
     /** Whether a PERMANENT path is patch-scoped static data (vs an immutable match). */
     private static boolean isPatchScoped(String path) {
         String p = stripQuery(path);
-        return p.startsWith("/heroStats") || p.equals("/heroes") || p.startsWith("/constants/");
+        return p.equals("/heroes") || p.startsWith("/constants/");
     }
 
     private static String stripQuery(String path) {

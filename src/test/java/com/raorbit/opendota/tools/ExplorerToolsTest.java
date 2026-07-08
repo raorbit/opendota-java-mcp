@@ -249,6 +249,30 @@ class ExplorerToolsTest {
     }
 
     @Test
+    void applyLimitHandlesLimitAllAndFetchFirstInsteadOfAppendingASecondLimiter() {
+        // LIMIT ALL means UNBOUNDED — it must become LIMIT cap, not "... LIMIT ALL LIMIT 200"
+        // (a Postgres syntax error) and not stay unbounded.
+        assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT ALL", 200)).isEqualTo("SELECT 1 LIMIT 200");
+        assertThat(ExplorerTools.applyLimit("SELECT 1 limit all offset 10", 200))
+                .isEqualTo("SELECT 1 LIMIT 200 offset 10");
+
+        // FETCH FIRST/NEXT ... ROWS ONLY is the SQL-standard limiter: appending LIMIT after it is a
+        // syntax error, so the count is clamped in place (form preserved).
+        assertThat(ExplorerTools.applyLimit("SELECT 1 FETCH FIRST 10 ROWS ONLY", 200))
+                .isEqualTo("SELECT 1 FETCH FIRST 10 ROWS ONLY");
+        assertThat(ExplorerTools.applyLimit("SELECT 1 fetch next 5000 rows only", 200))
+                .isEqualTo("SELECT 1 FETCH NEXT 200 ROWS ONLY");
+        // An absent count means 1 row; "ROW" and "WITH TIES" spellings are recognized too.
+        assertThat(ExplorerTools.applyLimit("SELECT 1 FETCH FIRST ROW ONLY", 200))
+                .isEqualTo("SELECT 1 FETCH FIRST 1 ROWS ONLY");
+        assertThat(ExplorerTools.applyLimit("SELECT * FROM t ORDER BY x FETCH FIRST 9999 ROWS WITH TIES", 200))
+                .isEqualTo("SELECT * FROM t ORDER BY x FETCH FIRST 200 ROWS WITH TIES");
+        // An over-long FETCH count clamps like an over-long LIMIT (never throws).
+        assertThat(ExplorerTools.applyLimit("SELECT 1 FETCH FIRST 9999999999999999999 ROWS ONLY", 200))
+                .isEqualTo("SELECT 1 FETCH FIRST 200 ROWS ONLY");
+    }
+
+    @Test
     void applyLimitClampsAnOverRangeLimitInsteadOfThrowing() {
         // A 19-digit LIMIT overflows a long; it must clamp to cap, not throw NumberFormatException.
         assertThat(ExplorerTools.applyLimit("SELECT 1 LIMIT 9999999999999999999", 2000))

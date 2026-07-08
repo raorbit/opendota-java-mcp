@@ -14,6 +14,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * An HTTP front end for a single shared {@link OpenDotaClient}.
@@ -54,6 +55,13 @@ public final class SidecarHttpServer implements AutoCloseable {
      * anti-DNS-rebinding guard (see {@link #hostAllowed}). Compared as literals, never DNS-resolved.
      */
     private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "::1");
+    /**
+     * A literal IPv4 loopback address ({@code 127.x.y.z}) — matched textually, never resolved. Accepted
+     * alongside {@link #LOOPBACK_HOSTS} because {@code SidecarMain.requiresToken} lets the sidecar bind
+     * any {@code 127.0.0.0/8} address token-less; without this, a sidecar bound to e.g. {@code 127.0.0.2}
+     * would start fine and then 403 its own agents' Host headers.
+     */
+    private static final Pattern LOOPBACK_IPV4 = Pattern.compile("127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}");
     /**
      * Coarse wire-contract version, surfaced on {@code /health} and {@code /stats} so an operator can spot
      * a sidecar running a different build than its agents. Bump only on a wire-contract change.
@@ -174,7 +182,7 @@ public final class SidecarHttpServer implements AutoCloseable {
                 respond(exchange, 405, "{\"error\":\"method not allowed\"}");
                 return;
             }
-            if (!hostAllowed(exchange)) {
+            if (!hostAllowed(exchange) || browserCrossOriginBlocked(exchange)) {
                 respond(exchange, 403, "{\"error\":\"forbidden\"}");
                 return;
             }
@@ -230,7 +238,7 @@ public final class SidecarHttpServer implements AutoCloseable {
                 respond(exchange, 405, "{\"error\":\"method not allowed\"}");
                 return;
             }
-            if (!hostAllowed(exchange)) {
+            if (!hostAllowed(exchange) || browserCrossOriginBlocked(exchange)) {
                 respond(exchange, 403, "{\"error\":\"forbidden\"}");
                 return;
             }
@@ -295,6 +303,10 @@ public final class SidecarHttpServer implements AutoCloseable {
      * and defeat the check. When a token IS set the shared-secret requirement already blocks a rebinding
      * page (it cannot know the secret) and the bind may legitimately be a container service name, so the
      * host check is skipped there.
+     *
+     * <p>This guard covers ONLY rebinding (where the browser believes the request is same-origin); a
+     * plain cross-origin request straight to {@code http://127.0.0.1:<port>} carries a legitimate
+     * loopback {@code Host} and passes it — that case is refused by {@link #browserCrossOriginBlocked}.
      */
     private boolean hostAllowed(HttpExchange exchange) {
         if (token != null) {
@@ -304,7 +316,37 @@ public final class SidecarHttpServer implements AutoCloseable {
         if (host == null || host.isBlank()) {
             return false;   // HTTP/1.1 mandates Host; a local agent always sends one.
         }
-        return LOOPBACK_HOSTS.contains(hostOnly(host));
+        String h = hostOnly(host);
+        return LOOPBACK_HOSTS.contains(h) || LOOPBACK_IPV4.matcher(h).matches();
+    }
+
+    /**
+     * Anti-CSRF guard for the token-less loopback default, complementing {@link #hostAllowed}: any web
+     * page the user has open can fire a direct cross-origin {@code fetch(..., {mode:'no-cors'})} at
+     * {@code http://127.0.0.1:<port>/...} — the browser sends it with a legitimate loopback {@code Host},
+     * so the anti-rebinding check passes and the page can drive reads and (worse) parse/refresh POSTs
+     * under the sidecar's shared API key. Browsers stamp such requests with forbidden headers page
+     * JavaScript cannot forge or strip: {@code Sec-Fetch-Site} (every modern browser) and {@code Origin}
+     * (always sent on cross-origin POSTs). A local agent client sends neither. So refuse when
+     * {@code Sec-Fetch-Site} is anything but {@code same-origin}/{@code none} (a user-typed navigation),
+     * and when any {@code Origin} header is present at all — the sidecar serves no pages, so no
+     * legitimate same-origin browser request exists. When a token IS configured the guard is skipped:
+     * the secret already defeats a hostile page (it cannot know it, and attaching the custom header
+     * would trigger a CORS preflight the sidecar never approves), and a trusted local dashboard may
+     * legitimately call a token-gated sidecar from browser JavaScript.
+     */
+    private boolean browserCrossOriginBlocked(HttpExchange exchange) {
+        if (token != null) {
+            return false;
+        }
+        String secFetchSite = exchange.getRequestHeaders().getFirst("Sec-Fetch-Site");
+        if (secFetchSite != null) {
+            String s = secFetchSite.trim().toLowerCase(Locale.ROOT);
+            if (!s.equals("same-origin") && !s.equals("none")) {
+                return true;
+            }
+        }
+        return exchange.getRequestHeaders().getFirst("Origin") != null;
     }
 
     /** The host part of a {@code Host} header, lower-cased, with any {@code :port} and IPv6 brackets removed. */

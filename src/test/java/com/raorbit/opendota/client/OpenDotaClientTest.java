@@ -420,6 +420,45 @@ class OpenDotaClientTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(20)
+    void stalledResponseBodyFailsInsteadOfHangingForever() throws Exception {
+        // Headers arrive promptly but the body then stalls (a half-open connection): the JDK's
+        // HttpRequest.timeout covers only time-to-headers, so without the whole-exchange bound in
+        // sendBounded() the synchronous send would block forever, permanently wedging the
+        // single-flight key. /search is a slow endpoint, so the resulting timeout is NOT retried
+        // (one upstream attempt) — which also keeps the single-threaded test server responsive.
+        CountDownLatch released = new CountDownLatch(1);
+        server.createContext("/api/search", exchange -> {
+            exchange.sendResponseHeaders(200, 1_000_000);   // promise a large body...
+            exchange.getResponseBody().write('x');          // ...deliver one byte...
+            exchange.getResponseBody().flush();
+            try {
+                released.await(15, TimeUnit.SECONDS);       // ...then stall until the test ends
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        // Shrink the whole-exchange bound (normally requestTimeout + 30s) to test scale.
+        OpenDotaClient client = new OpenDotaClient(null, base) {
+            @Override
+            Duration exchangeTimeout(Duration requestTimeout) {
+                return Duration.ofMillis(500);
+            }
+        };
+        try {
+            long startNanos = System.nanoTime();
+            assertThatThrownBy(() -> client.getJson("/search?q=stall"))
+                    .isInstanceOf(OpenDotaException.class)
+                    .satisfies(t -> assertThat(((OpenDotaException) t).statusCode()).isEqualTo(0));
+            // The call must settle around the exchange bound — nowhere near the 15s handler stall.
+            assertThat((System.nanoTime() - startNanos) / 1_000_000L).isLessThan(10_000L);
+        } finally {
+            released.countDown();
+        }
+    }
+
+    @Test
     void oversizedResponseBodyIsAbortedNotBuffered() {
         // Body (4 KB) far exceeds the 1 KB cap, so the read is aborted and mapped
         // to a transport-level (statusCode 0) error rather than buffered.

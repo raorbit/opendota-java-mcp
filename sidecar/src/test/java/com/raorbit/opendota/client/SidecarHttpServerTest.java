@@ -116,12 +116,30 @@ class SidecarHttpServerTest {
      * path and forbids setting the {@code Host} header — both of which these guards must be tested against.
      */
     private int rawRequest(String method, String target, String hostHeader) throws IOException {
+        return rawRequest(sidecar.port(), method, target, hostHeader);
+    }
+
+    /**
+     * As {@link #rawRequest(String, String, String)} but against an explicit port and with optional extra
+     * header lines (e.g. {@code "Origin: https://evil.example"}), so the browser-only forbidden headers
+     * the cross-origin guard keys on can be sent exactly as a browser would.
+     */
+    private static int rawRequest(int port, String method, String target, String hostHeader,
+            String... extraHeaders) throws IOException {
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress("127.0.0.1", sidecar.port()), 2000);
+            socket.connect(new InetSocketAddress("127.0.0.1", port), 2000);
             socket.setSoTimeout(2000);
-            socket.getOutputStream().write((method + " " + target + " HTTP/1.1\r\n"
-                    + "Host: " + hostHeader + "\r\n"
-                    + "Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            StringBuilder request = new StringBuilder()
+                    .append(method).append(' ').append(target).append(" HTTP/1.1\r\n")
+                    .append("Host: ").append(hostHeader).append("\r\n");
+            for (String header : extraHeaders) {
+                request.append(header).append("\r\n");
+            }
+            if ("POST".equals(method)) {
+                request.append("Content-Length: 0\r\n");
+            }
+            request.append("Connection: close\r\n\r\n");
+            socket.getOutputStream().write(request.toString().getBytes(StandardCharsets.US_ASCII));
             socket.getOutputStream().flush();
             BufferedReader in = new BufferedReader(
                     new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
@@ -144,11 +162,69 @@ class SidecarHttpServerTest {
         // A spoofed (non-loopback) Host is refused with 403 and never reaches the upstream...
         assertThat(rawRequest("GET", "/api/heroes", "evil.example.com")).isEqualTo(403);
         assertThat(upstreamHits.get()).isZero();
-        // ...while genuine loopback Hosts are served.
+        // ...while genuine loopback Hosts are served — including the bracketed IPv6 literal forms,
+        // pinning both the "::1" LOOPBACK_HOSTS membership and hostOnly()'s bracket/port stripping.
         assertThat(rawRequest("GET", "/api/heroes", "127.0.0.1:" + sidecar.port())).isEqualTo(200);
         assertThat(rawRequest("GET", "/api/heroes", "localhost")).isEqualTo(200);
-        // /heroes is cacheable, so the two allowed reads collapse to a single upstream fetch.
+        assertThat(rawRequest("GET", "/api/heroes", "[::1]:" + sidecar.port())).isEqualTo(200);
+        assertThat(rawRequest("GET", "/api/heroes", "[::1]")).isEqualTo(200);
+        // Any literal 127/8 address is loopback (requiresToken lets the sidecar BIND any of them
+        // token-less, so its own agents' Host headers must be accepted)...
+        assertThat(rawRequest("GET", "/api/heroes", "127.0.0.2:" + sidecar.port())).isEqualTo(200);
+        // ...but only as a full dotted-quad literal — hostNAMES under a 127. label stay rejected.
+        assertThat(rawRequest("GET", "/api/heroes", "127.evil.example.com")).isEqualTo(403);
+        assertThat(rawRequest("GET", "/api/heroes", "127.0.0.1.evil.example.com")).isEqualTo(403);
+        // An UNbracketed IPv6 Host is malformed per RFC 7230 (the port separator is ambiguous), so it
+        // is rejected rather than special-cased.
+        assertThat(rawRequest("GET", "/api/heroes", "::1")).isEqualTo(403);
+        // /heroes is cacheable, so the allowed reads collapse to a single upstream fetch.
         assertThat(upstreamHits.get()).isEqualTo(1);
+    }
+
+    @Test
+    void browserCrossOriginRequestsAreRejectedWhenNoTokenSet() throws Exception {
+        // A malicious page can fire fetch(..., {mode:'no-cors'}) straight at http://127.0.0.1:<port>
+        // with a perfectly legitimate loopback Host header, so the anti-rebinding Host guard alone
+        // cannot stop it — most damagingly on the POST write path, which queues parse jobs under the
+        // sidecar's shared API key. Browsers stamp such requests with forbidden headers page script
+        // cannot strip (Sec-Fetch-Site, Origin); the token-less sidecar must refuse them.
+        stubUpstream("/api/heroes", 200, "[]");
+        stubUpstream("/api/request/123", 200, "{\"job\":{\"jobId\":42}}");
+        String host = "127.0.0.1:" + sidecar.port();
+
+        // Cross-site browser traffic is refused, on reads and writes alike...
+        assertThat(rawRequest(sidecar.port(), "GET", "/api/heroes", host,
+                "Sec-Fetch-Site: cross-site")).isEqualTo(403);
+        assertThat(rawRequest(sidecar.port(), "POST", "/api/request/123", host,
+                "Sec-Fetch-Site: cross-site", "Origin: https://evil.example")).isEqualTo(403);
+        // ...including same-site (another localhost port) and an Origin-only request from an older
+        // browser without fetch metadata. /stats is guarded the same way.
+        assertThat(rawRequest(sidecar.port(), "GET", "/api/heroes", host,
+                "Sec-Fetch-Site: same-site")).isEqualTo(403);
+        assertThat(rawRequest(sidecar.port(), "POST", "/api/request/123", host,
+                "Origin: https://evil.example")).isEqualTo(403);
+        assertThat(rawRequest(sidecar.port(), "GET", "/stats", host,
+                "Sec-Fetch-Site: cross-site")).isEqualTo(403);
+        assertThat(upstreamHits.get()).isZero();
+
+        // Non-browser agent clients (no fetch-metadata headers) and a user-typed navigation still pass.
+        assertThat(rawRequest("GET", "/api/heroes", host)).isEqualTo(200);
+        assertThat(rawRequest(sidecar.port(), "GET", "/api/heroes", host,
+                "Sec-Fetch-Site: none")).isEqualTo(200);
+    }
+
+    @Test
+    void tokenGatedSidecarSkipsTheCrossOriginGuard() throws Exception {
+        // With a shared secret configured the token itself is the CSRF defense (a hostile page cannot
+        // know it, and attaching the header would force a CORS preflight the sidecar never approves),
+        // so browser-shaped traffic presenting a valid token — e.g. a trusted local dashboard — is served.
+        stubUpstream("/api/heroes", 200, "[]");
+        try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "s3cret")) {
+            gated.start();
+            assertThat(rawRequest(gated.port(), "GET", "/api/heroes", "127.0.0.1:" + gated.port(),
+                    "Sec-Fetch-Site: cross-site", "Origin: http://localhost:3000",
+                    "X-Sidecar-Token: s3cret")).isEqualTo(200);
+        }
     }
 
     @Test
@@ -156,6 +232,15 @@ class SidecarHttpServerTest {
         // A raw '..' segment must be rejected rather than forwarded to OpenDota unnormalized (the JDK
         // HttpClient would strip it, so it is sent over a socket). Never reaches the upstream.
         stubUpstream("/api/records", 200, "[]");
+        // Catch-all context so ANY forwarded request — even one no stub matches — counts as an
+        // upstream hit. Without it, forwarded-but-unmatched gets the server's built-in 404 with
+        // upstreamHits untouched, indistinguishable from the guard rejecting the path — i.e. these
+        // assertions would stay green even with the traversal guard deleted.
+        upstream.createContext("/", exchange -> {
+            upstreamHits.incrementAndGet();
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
         String host = "127.0.0.1:" + sidecar.port();
         assertThat(rawRequest("GET", "/api/../records", host)).isEqualTo(404);
         assertThat(rawRequest("GET", "/api/players/../../records", host)).isEqualTo(404);
@@ -164,6 +249,12 @@ class SidecarHttpServerTest {
         assertThat(rawRequest("GET", "/api/players/%2e%2e/%2e%2e/admin", host)).isEqualTo(404);
         assertThat(rawRequest("GET", "/api/players/%2E%2E/records", host)).isEqualTo(404);
         assertThat(rawRequest("GET", "/api/players/..%2f..%2fadmin", host)).isEqualTo(404);
+        // The encoded backslash separator (Windows-style traversal a normalizing upstream could
+        // collapse) and the encoded percent (which would smuggle a DOUBLE-encoded traversal through
+        // one round of upstream decoding) are rejected too, upper- and lower-case.
+        assertThat(rawRequest("GET", "/api/players/..%5c..%5cadmin", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/..%5C..%5Cadmin", host)).isEqualTo(404);
+        assertThat(rawRequest("GET", "/api/players/%252e%252e/admin", host)).isEqualTo(404);
         assertThat(upstreamHits.get()).isZero();
     }
 

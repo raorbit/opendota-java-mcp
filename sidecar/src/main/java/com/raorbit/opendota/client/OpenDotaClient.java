@@ -19,14 +19,15 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Thin HTTP client for the OpenDota API.
  *
  * <p>Backed by a single shared {@link HttpClient}, a token-bucket
  * {@link RateLimiter} sized to the OpenDota free/keyed tiers, and a
- * {@link TtlCache} of recent responses. The public method signatures are frozen
- * (the WP1 surface); only the bodies are real here.
+ * {@link TtlCache} of recent responses.
  *
  * <p>The API key (when supplied) is treated as a secret: it is appended to the
  * outgoing URL only, and never logged, never included in exception messages,
@@ -35,7 +36,7 @@ import java.util.concurrent.Flow;
 public class OpenDotaClient implements AutoCloseable {
 
     private static final String DEFAULT_BASE = "https://api.opendota.com/api";
-    private static final String USER_AGENT = "opendota-mcp/1.0.0";
+    private static final String USER_AGENT = "opendota-mcp/1.2.0";
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
@@ -65,6 +66,22 @@ public class OpenDotaClient implements AutoCloseable {
     private static final Duration UPSTREAM_RETRY_MAX_BACKOFF = Duration.ofSeconds(1);
     /** Cap on how long an upstream {@code Retry-After} hint may make a retry wait, so a tool call can't hang. */
     private static final Duration MAX_RETRY_AFTER_BACKOFF = Duration.ofSeconds(5);
+    /**
+     * Additional time allowed for body delivery beyond the per-request timeout.
+     * {@link HttpRequest#timeout} bounds only the wait for response <em>headers</em> — java.net.http
+     * cancels that timer once headers arrive and has no read/idle timeout for the body — so the whole
+     * exchange is additionally bounded at {@code requestTimeout + BODY_DELIVERY_TIMEOUT} (see
+     * {@link #sendBounded}); past that the exchange is cancelled rather than left blocking forever
+     * on a connection that went half-open mid-body.
+     */
+    private static final Duration BODY_DELIVERY_TIMEOUT = Duration.ofSeconds(30);
+    /**
+     * Hard ceiling on how long a single-flight follower waits for its leader's result — defense in
+     * depth sized comfortably above the worst-case leader budget (permit wait + every retry's
+     * bounded exchange + backoff sleeps), so a follower can never park indefinitely behind a
+     * wedged leader.
+     */
+    private static final Duration SINGLE_FLIGHT_AWAIT_TIMEOUT = Duration.ofMinutes(4);
     /** Default upper bound on time a request waits for a rate-limit permit. */
     private static final Duration DEFAULT_RATE_LIMIT_BUDGET = Duration.ofSeconds(10);
     /** Default maximum number of cached responses retained before eviction. */
@@ -382,7 +399,11 @@ public class OpenDotaClient implements AutoCloseable {
     /** Await a leader's in-flight result, translating its failure back into an {@link OpenDotaException}. */
     private String await(CompletableFuture<String> leader, String path) throws OpenDotaException {
         try {
-            return leader.get();
+            return leader.get(SINGLE_FLIGHT_AWAIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException te) {
+            // Should be unreachable now that the leader's exchange is itself time-bounded (see
+            // sendBounded); kept as a last-resort bound so a follower can never park forever.
+            throw new OpenDotaException(0, path, "timed out waiting for the shared in-flight request");
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new OpenDotaException(0, path, "request interrupted", ie);
@@ -470,9 +491,10 @@ public class OpenDotaClient implements AutoCloseable {
 
             try {
                 // A size-capped subscriber (rather than BodyHandlers.ofString) so a
-                // hostile/oversized upstream body cannot exhaust the heap. The body is
-                // still delivered through the client's subscriber pipeline, so the
-                // request timeout continues to bound delivery.
+                // hostile/oversized upstream body cannot exhaust the heap, and a
+                // whole-exchange bound (see sendBounded) so a body that stalls after the
+                // headers arrive cannot block the call forever — HttpRequest.timeout only
+                // covers time-to-headers, never body delivery.
                 HttpResponse<String> response = send(request);
                 int status = response.statusCode();
                 String body = response.body();
@@ -626,13 +648,13 @@ public class OpenDotaClient implements AutoCloseable {
      */
     private HttpResponse<String> send(HttpRequest request) throws IOException, InterruptedException {
         if (!forwarding) {
-            return httpClient.send(request, info -> new CappedBodySubscriber(maxResponseBytes));
+            return sendBounded(request);
         }
         long deadlineNanos = System.nanoTime() + SIDECAR_RETRY_BUDGET.toNanos();
         long backoffMillis = SIDECAR_RETRY_BASE_BACKOFF.toMillis();
         while (true) {
             try {
-                return httpClient.send(request, info -> new CappedBodySubscriber(maxResponseBytes));
+                return sendBounded(request);
             } catch (ConnectException ce) {
                 long remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L;
                 if (remainingMillis <= 0L) {
@@ -642,6 +664,55 @@ public class OpenDotaClient implements AutoCloseable {
                 backoffMillis = Math.min(backoffMillis * 2, SIDECAR_RETRY_MAX_BACKOFF.toMillis());
             }
         }
+    }
+
+    /**
+     * Send one exchange with the WHOLE exchange bounded in time, not just time-to-headers.
+     * {@link HttpRequest#timeout} bounds only the wait for the response headers — the JDK cancels
+     * that timer as soon as headers arrive and provides no read/idle timeout for the body — so a
+     * connection that goes half-open mid-body (NAT idle drop, CDN stall) would block a synchronous
+     * {@code HttpClient.send} forever, wedging the single-flight key and leaking one parked thread
+     * per subsequent caller. Instead the exchange runs async and is awaited for the request timeout
+     * plus {@link #BODY_DELIVERY_TIMEOUT}; on expiry it is cancelled and surfaced as an
+     * {@link HttpTimeoutException} on the normal transport-error path.
+     */
+    private HttpResponse<String> sendBounded(HttpRequest request) throws IOException, InterruptedException {
+        CompletableFuture<HttpResponse<String>> exchange =
+                httpClient.sendAsync(request, info -> new CappedBodySubscriber(maxResponseBytes));
+        Duration bound = exchangeTimeout(request.timeout().orElse(REQUEST_TIMEOUT));
+        try {
+            return exchange.get(bound.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException te) {
+            exchange.cancel(true);
+            throw new HttpTimeoutException("response not fully delivered within " + bound.toSeconds() + "s");
+        } catch (InterruptedException ie) {
+            exchange.cancel(true);
+            throw ie;
+        } catch (ExecutionException ee) {
+            // Unwrap to the exception the synchronous send() would have thrown, so the callers'
+            // retry/error mapping (ConnectException, HttpTimeoutException, ResponseTooLarge...)
+            // behaves exactly as before.
+            Throwable cause = ee.getCause();
+            if (cause instanceof IOException io) {
+                throw io;
+            }
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            if (cause instanceof Error err) {
+                throw err;
+            }
+            throw new IOException(cause == null ? "unknown exchange failure" : cause.toString(), cause);
+        }
+    }
+
+    /**
+     * The whole-exchange bound for a request: its (time-to-headers) timeout plus the body-delivery
+     * margin. Package-private and instance-scoped solely so the stalled-body regression test can
+     * shrink it to test scale; treat it as private otherwise.
+     */
+    Duration exchangeTimeout(Duration requestTimeout) {
+        return requestTimeout.plus(BODY_DELIVERY_TIMEOUT);
     }
 
     /** True if {@code t} or any of its causes is a {@link ResponseTooLargeException}. */

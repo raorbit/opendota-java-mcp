@@ -3,6 +3,8 @@ package com.raorbit.opendota.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Tunables for the OpenDota client, bound from the {@code opendota.*} prefix.
@@ -172,6 +174,16 @@ public class OpenDotaProperties {
          */
         private String bearerToken;
 
+        /**
+         * Extra {@code Host} header values the {@code auth-mode=none} anti-DNS-rebinding guard
+         * accepts in addition to the loopback literals — set this to the public hostname your
+         * fronting proxy/tunnel forwards (e.g. {@code opendota.example.com}), since cloudflared and
+         * Caddy pass the original public {@code Host} through to the loopback app. Comma-separated;
+         * compared as case-insensitive literals (any {@code :port} ignored), never DNS-resolved.
+         * Unused in bearer mode (the guard only runs when {@code auth-mode=none}).
+         */
+        private List<String> allowedHosts = new ArrayList<>();
+
         public AuthMode getAuthMode() {
             return authMode;
         }
@@ -186,6 +198,14 @@ public class OpenDotaProperties {
 
         public void setBearerToken(String bearerToken) {
             this.bearerToken = bearerToken;
+        }
+
+        public List<String> getAllowedHosts() {
+            return allowedHosts;
+        }
+
+        public void setAllowedHosts(List<String> allowedHosts) {
+            this.allowedHosts = allowedHosts;
         }
     }
 }
