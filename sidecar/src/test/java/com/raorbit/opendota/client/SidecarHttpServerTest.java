@@ -232,6 +232,15 @@ class SidecarHttpServerTest {
         // A raw '..' segment must be rejected rather than forwarded to OpenDota unnormalized (the JDK
         // HttpClient would strip it, so it is sent over a socket). Never reaches the upstream.
         stubUpstream("/api/records", 200, "[]");
+        // Catch-all context so ANY forwarded request — even one no stub matches — counts as an
+        // upstream hit. Without it, forwarded-but-unmatched gets the server's built-in 404 with
+        // upstreamHits untouched, indistinguishable from the guard rejecting the path — i.e. these
+        // assertions would stay green even with the traversal guard deleted.
+        upstream.createContext("/", exchange -> {
+            upstreamHits.incrementAndGet();
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
         String host = "127.0.0.1:" + sidecar.port();
         assertThat(rawRequest("GET", "/api/../records", host)).isEqualTo(404);
         assertThat(rawRequest("GET", "/api/players/../../records", host)).isEqualTo(404);
