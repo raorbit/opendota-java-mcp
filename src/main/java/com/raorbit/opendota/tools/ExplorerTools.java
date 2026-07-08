@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.raorbit.opendota.client.OpenDotaClient;
 import com.raorbit.opendota.client.OpenDotaException;
 import com.raorbit.opendota.client.ToolResults;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -51,6 +52,13 @@ public class ExplorerTools {
             Pattern.compile("^\\s*(select|with)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern TRAILING_LIMIT =
             Pattern.compile("\\blimit\\s+(\\d+)(\\s+offset\\s+\\d+)?\\s*$", Pattern.CASE_INSENSITIVE);
+    /** Postgres' "no limit" spelling — a valid terminal limiter TRAILING_LIMIT's digits don't match. */
+    private static final Pattern TRAILING_LIMIT_ALL =
+            Pattern.compile("\\blimit\\s+all(\\s+offset\\s+\\d+)?\\s*$", Pattern.CASE_INSENSITIVE);
+    /** The SQL-standard row-bounding form: {@code FETCH FIRST/NEXT [n] ROW(S) ONLY / WITH TIES}. */
+    private static final Pattern TRAILING_FETCH =
+            Pattern.compile("\\bfetch\\s+(first|next)(\\s+\\d+)?\\s+rows?\\s+(only|with\\s+ties)\\s*$",
+                    Pattern.CASE_INSENSITIVE);
     private static final Pattern TRAILING_SEMICOLON = Pattern.compile(";\\s*$");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Logger log = LoggerFactory.getLogger(ExplorerTools.class);
@@ -142,11 +150,16 @@ public class ExplorerTools {
     }
 
     /**
-     * Ensures the query ends with a LIMIT clause bounded by {@code cap}.
+     * Ensures the query ends with a row bound no larger than {@code cap}.
      * If a limit exists and exceeds cap, it is clamped; otherwise, a limit is appended.
      * Preserves trailing OFFSET if present after LIMIT.
      *
-     * <p>A LIMIT literal too large to fit in a {@code long} (e.g. {@code LIMIT 9999999999999999999})
+     * <p>The other terminal limiter spellings Postgres accepts are handled in place rather than
+     * appended-after (a second limiter is a syntax error): {@code LIMIT ALL} (which means
+     * <em>unbounded</em>) is replaced with {@code LIMIT cap}, and {@code FETCH FIRST/NEXT n ROWS
+     * ONLY / WITH TIES} has its count (absent = 1) clamped to {@code cap}, keeping the form.
+     *
+     * <p>A count literal too large to fit in a {@code long} (e.g. {@code LIMIT 9999999999999999999})
      * is, a fortiori, larger than {@code cap}, so it is clamped to {@code cap} like any other
      * oversized LIMIT — rather than letting {@link Long#parseLong} throw a
      * {@link NumberFormatException} out of the (never-throwing) tool handler.
@@ -162,6 +175,23 @@ public class ExplorerTools {
             }
             String offset = m.group(2) != null ? m.group(2) : "";
             return m.replaceFirst("LIMIT " + Math.min(requested, cap) + offset);
+        }
+        Matcher all = TRAILING_LIMIT_ALL.matcher(sql);
+        if (all.find()) {
+            String offset = all.group(1) != null ? all.group(1) : "";
+            return all.replaceFirst("LIMIT " + cap + offset);
+        }
+        Matcher fetch = TRAILING_FETCH.matcher(sql);
+        if (fetch.find()) {
+            long requested;
+            try {
+                requested = fetch.group(2) == null ? 1L : Long.parseLong(fetch.group(2).trim());
+            } catch (NumberFormatException overflow) {
+                requested = cap;
+            }
+            String ties = fetch.group(3).toUpperCase(Locale.ROOT).replaceAll("\\s+", " ");
+            return fetch.replaceFirst("FETCH " + fetch.group(1).toUpperCase(Locale.ROOT) + " "
+                    + Math.min(requested, cap) + " ROWS " + ties);
         }
         return sql + " LIMIT " + cap;
     }
