@@ -14,7 +14,7 @@ management, the Spring AI BOM, and the MCP Java SDK each pin large transitive
 trees, and those trees overlap. The pins that matter (see the root `pom.xml`
 and `CLAUDE.md`):
 
-- Maven parent: `spring-boot-starter-parent` **3.5.15**
+- Maven parent: `spring-boot-starter-parent` **3.5.16**
 - Spring AI BOM: **1.1.8**
 - MCP server starter: `org.springframework.ai:spring-ai-starter-mcp-server`
   (the **core stdio** starter — the only MCP dependency in the **default** build).
@@ -39,10 +39,12 @@ must not be removed:
 
 - MCP SDK 0.18.3 (`mcp-json-jackson2`) needs json-schema-validator **2.0.0** —
   it references class `com.networknt.schema.dialect.Dialects`.
-- Spring Boot 3.5.15's dependency management otherwise pins json-schema-validator
-  to **1.5.9**, which **lacks** that class.
-- Without the override, the server throws `NoClassDefFoundError` for
-  `com.networknt.schema.dialect.Dialects` **at startup**.
+- Spring Boot parents through 3.5.15 otherwise pinned json-schema-validator to
+  **1.5.9**, which **lacks** that class — without the override, the server threw
+  `NoClassDefFoundError` for `com.networknt.schema.dialect.Dialects` **at startup**.
+- As of parent 3.5.16, Boot no longer manages this artifact at all, so the
+  override is the sole version authority; it stays as a guard so nothing can
+  silently pull the version below what the SDK needs.
 
 This is a version-only override: no new or banned dependency is introduced, and
 the SDK already pulls json-schema-validator in transitively. We simply move it
