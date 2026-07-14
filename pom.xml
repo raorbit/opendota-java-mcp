@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.5.15</version>
+        <version>3.5.16</version>
         <relativePath/>
     </parent>
 
@@ -44,10 +44,14 @@
             <!--
               The MCP SDK 0.18.3 (mcp-json-jackson2) requires
               com.networknt:json-schema-validator:2.0.0 (class
-              com.networknt.schema.dialect.Dialects). Spring Boot 3.5.15's
-              dependency management pins it to 1.5.9, which lacks that class and
-              causes a NoClassDefFoundError at server startup. Align it to 2.0.0
-              (version-only override; no new/banned dependency introduced).
+              com.networknt.schema.dialect.Dialects) and declares that version
+              in its own pom. Verified against the resolved BOMs (2026-07-14):
+              neither Spring Boot 3.5.15/3.5.16 nor spring-ai-bom 1.1.8 carries
+              a managed entry for this artifact, so resolution yields 2.0.0 even
+              without this pin. Keep it anyway as a downgrade guard: if a future
+              parent/BOM starts managing this artifact below 2.0.0, the server
+              fails at startup with NoClassDefFoundError (version-only override;
+              no new/banned dependency introduced).
             -->
             <dependency>
                 <groupId>com.networknt</groupId>
@@ -80,7 +84,7 @@
         </dependency>
         <!--
           NOTE: org.wiremock:wiremock was intentionally removed. WireMock 3.13.2
-          bundles a Jetty 11 HTTP server, but Spring Boot 3.5.15's dependency
+          bundles a Jetty 11 HTTP server, but Spring Boot 3.5.x's dependency
           management force-upgrades Jetty to 12 (incompatible Handler API), so
           WireMock fails to start on this classpath. OpenDotaClientTest uses the
           JDK's com.sun.net.httpserver.HttpServer instead (zero extra deps). If a
@@ -145,7 +149,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-enforcer-plugin</artifactId>
-                        <version>3.5.0</version>
+                        <version>3.6.3</version>
                         <executions>
                             <execution>
                                 <id>ban-web-server</id>
