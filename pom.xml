@@ -44,12 +44,14 @@
             <!--
               The MCP SDK 0.18.3 (mcp-json-jackson2) requires
               com.networknt:json-schema-validator:2.0.0 (class
-              com.networknt.schema.dialect.Dialects). Spring Boot parents through
-              3.5.15 managed it to 1.5.9, which lacks that class and caused a
-              NoClassDefFoundError at server startup; 3.5.16 dropped its managed
-              entry entirely, so this pin is now the sole version authority. Keep
-              it at 2.0.0 (version-only override; no new/banned dependency
-              introduced).
+              com.networknt.schema.dialect.Dialects) and declares that version
+              in its own pom. Verified against the resolved BOMs (2026-07-14):
+              neither Spring Boot 3.5.15/3.5.16 nor spring-ai-bom 1.1.8 carries
+              a managed entry for this artifact, so resolution yields 2.0.0 even
+              without this pin. Keep it anyway as a downgrade guard: if a future
+              parent/BOM starts managing this artifact below 2.0.0, the server
+              fails at startup with NoClassDefFoundError (version-only override;
+              no new/banned dependency introduced).
             -->
             <dependency>
                 <groupId>com.networknt</groupId>

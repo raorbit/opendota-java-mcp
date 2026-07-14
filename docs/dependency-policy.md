@@ -38,17 +38,18 @@ The root `pom.xml` carries a single-line `dependencyManagement` entry pinning
 must not be removed:
 
 - MCP SDK 0.18.3 (`mcp-json-jackson2`) needs json-schema-validator **2.0.0** —
-  it references class `com.networknt.schema.dialect.Dialects`.
-- Spring Boot parents through 3.5.15 otherwise pinned json-schema-validator to
-  **1.5.9**, which **lacks** that class — without the override, the server threw
-  `NoClassDefFoundError` for `com.networknt.schema.dialect.Dialects` **at startup**.
-- As of parent 3.5.16, Boot no longer manages this artifact at all, so the
-  override is the sole version authority; it stays as a guard so nothing can
-  silently pull the version below what the SDK needs.
+  it references class `com.networknt.schema.dialect.Dialects` — and declares
+  2.0.0 in its own pom.
+- Verified against the resolved BOMs (2026-07-14): neither Spring Boot
+  3.5.15/3.5.16 nor spring-ai-bom 1.1.8 carries a managed entry for this
+  artifact, so resolution yields 2.0.0 from the SDK even without the override.
+- The override stays as a **downgrade guard**: if a future parent/BOM starts
+  managing this artifact below 2.0.0, the server fails at startup with
+  `NoClassDefFoundError` for `com.networknt.schema.dialect.Dialects`.
 
 This is a version-only override: no new or banned dependency is introduced, and
-the SDK already pulls json-schema-validator in transitively. We simply move it
-forward to the version the SDK actually needs.
+the SDK already pulls json-schema-validator in transitively. We simply hold it
+at the version the SDK actually needs.
 
 This is the **canonical backport template** for this repo:
 
