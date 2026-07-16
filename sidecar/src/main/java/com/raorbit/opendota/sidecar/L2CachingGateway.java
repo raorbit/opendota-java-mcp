@@ -103,6 +103,15 @@ public final class L2CachingGateway implements AutoCloseable {
     private volatile long lastPatchBustMillis;
     /** Whether the last attempt failed to observe a patch id, so the next check uses the shorter failure backoff. */
     private volatile boolean lastPatchCheckFailed;
+    /**
+     * The current patch id as last observed (or read from the store's meta row); {@code null} until
+     * known. Seeded once in the constructor and refreshed only inside the interval-gated check, so the
+     * not-due fast path of {@link #maybeCheckPatch} reads this volatile instead of calling
+     * {@code store.storedPatchId()} — a {@code synchronized} read on the single <em>write</em>
+     * connection — on every patch-scoped request, which would serialize otherwise-parallel
+     * read-pool lookups.
+     */
+    private volatile String cachedPatchId;
     /** Guards a single in-flight patch check so concurrent PERMANENT requests don't all check at once. */
     private final AtomicBoolean patchCheckInProgress = new AtomicBoolean(false);
     /** Paths with a store in flight, so concurrent single-flight misses collapse to one write. */
@@ -160,6 +169,13 @@ public final class L2CachingGateway implements AutoCloseable {
                     + "re-fetch reads through the client's cache — an unparsed watched match still takes "
                     + "up to " + matchL1Millis + "ms to observe its parse. Leave "
                     + "OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS at/above the TTL.");
+        }
+        // Seed the patch-id cache from the store once, so early not-due requests (e.g. while another
+        // thread runs the first interval-gated check) don't see an unknown patch and skip their stores.
+        try {
+            this.cachedPatchId = store.storedPatchId();
+        } catch (SQLException ex) {
+            recordError("L2 patch read", "(meta)", ex);
         }
     }
 
@@ -553,6 +569,7 @@ public final class L2CachingGateway implements AutoCloseable {
             try {
                 String observed = observeCurrentPatch();
                 String stored = store.storedPatchId();
+                cachedPatchId = observed != null ? observed : stored;
                 if (observed != null) {
                     if (!observed.equals(stored)) {
                         int deleted = store.patchBust();
@@ -587,13 +604,10 @@ public final class L2CachingGateway implements AutoCloseable {
                 patchCheckInProgress.set(false);
             }
         }
-        // Not due (or another thread is checking): fall back to the stored id for the read guard.
-        try {
-            return store.storedPatchId();
-        } catch (SQLException ex) {
-            recordError("L2 patch read", "(meta)", ex);
-            return null;
-        }
+        // Not due (or another thread is checking): use the cached id for the read guard. Reading the
+        // store's meta row here would put a synchronized write-connection read on EVERY patch-scoped
+        // request — even L2 hits — serializing what the read pool exists to parallelize.
+        return cachedPatchId;
     }
 
     /**
