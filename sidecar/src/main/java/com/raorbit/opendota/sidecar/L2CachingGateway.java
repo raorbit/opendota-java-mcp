@@ -148,6 +148,19 @@ public final class L2CachingGateway implements AutoCloseable {
                     + "ms to detect. Set OPENDOTA_SIDECAR_PATCH_ID to drive detection explicitly, or "
                     + "leave the interval at/above the TTL.");
         }
+        // Same floor for the watched-archive re-fetch: the forced re-fetch of an unparsed PINNED match
+        // reads /matches/{id} THROUGH the client, so it is served from L1 for that path's ttlFor horizon
+        // — a smaller interval (including 0, re-fetch on every access) keeps re-reading the same cached
+        // unparsed body and cannot observe a parse any faster than the L1 TTL. Warn rather than clamp,
+        // mirroring the patch-check floor above.
+        long matchL1Millis = client.ttlFor("/matches/0").toMillis();
+        if (watchedPattern != null && config.watchedRefetchMillis() < matchL1Millis) {
+            LOG.warning(() -> "L2 watched re-fetch interval " + config.watchedRefetchMillis()
+                    + "ms is below the " + matchL1Millis + "ms L1 TTL of /matches/{id}, which the forced "
+                    + "re-fetch reads through the client's cache — an unparsed watched match still takes "
+                    + "up to " + matchL1Millis + "ms to observe its parse. Leave "
+                    + "OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS at/above the TTL.");
+        }
     }
 
     /**

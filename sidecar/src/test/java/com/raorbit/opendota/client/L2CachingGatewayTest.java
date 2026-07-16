@@ -368,6 +368,51 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- A sub-L1-TTL watched re-fetch interval warns that it is floored (mirrors the patch floor) ----
+    @Test
+    void subL1WatchedRefetchIntervalWarnsAboutTheFloor(@TempDir Path tmp) throws Exception {
+        java.util.logging.Logger log =
+                java.util.logging.Logger.getLogger(L2CachingGateway.class.getName());
+        List<java.util.logging.LogRecord> records = new CopyOnWriteArrayList<>();
+        java.util.logging.Handler capture = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        log.addHandler(capture);
+        try (CountingClient client = new CountingClient()) {
+            // 30s < the 60s L1 TTL of /matches/{id}: the forced re-fetch reads through L1, so the knob
+            // is silently floored — the constructor must warn.
+            try (L2Store store = new L2Store(tmp.resolve("warn.db"), L2Store.SCHEMA_VERSION);
+                 L2CachingGateway gw = new L2CachingGateway(client, store,
+                         config(tmp.resolve("warn.db"), watching(WATCHED_ID), 30_000L))) {
+                assertThat(records).anySatisfy(r -> {
+                    assertThat(r.getLevel()).isEqualTo(java.util.logging.Level.WARNING);
+                    assertThat(r.getMessage()).contains("watched re-fetch interval");
+                });
+            }
+            // At/above the TTL (or with no watched players) there is nothing to warn about.
+            records.clear();
+            try (L2Store store = new L2Store(tmp.resolve("ok.db"), L2Store.SCHEMA_VERSION);
+                 L2CachingGateway gw = new L2CachingGateway(client, store,
+                         config(tmp.resolve("ok.db"), watching(WATCHED_ID), Duration.ofHours(1).toMillis()))) {
+                assertThat(records).noneSatisfy(r ->
+                        assertThat(r.getMessage()).contains("watched re-fetch interval"));
+            }
+        } finally {
+            log.removeHandler(capture);
+        }
+    }
+
     // ---- Gate 5: per-row stale patch_id is treated as a miss ----
     @Test
     void perRowStalePatchIdIsTreatedAsMiss(@TempDir Path tmp) throws Exception {
