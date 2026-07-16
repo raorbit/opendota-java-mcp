@@ -117,6 +117,33 @@ class WatchedAutoParserTest {
     }
 
     @Test
+    void pollOnceCapsParseRequestsPerSweepAndLaterSweepsDrainTheBacklog() {
+        FakeClient client = new FakeClient();
+        int backlog = WatchedAutoParser.MAX_PARSE_REQUESTS_PER_SWEEP + 5;
+        StringBuilder body = new StringBuilder("[");
+        for (int i = 1; i <= backlog; i++) {
+            if (i > 1) {
+                body.append(',');
+            }
+            body.append("{\"match_id\":").append(i).append(",\"version\":null}");
+        }
+        body.append(']');
+        client.bodies.put("/players/5/matches?project=version&limit=100", body.toString());
+        try (client; WatchedAutoParser parser = new WatchedAutoParser(client, Set.of(5L), 3_600_000L)) {
+            // One sweep issues at most the cap — a fresh backlog must not burn a burst of ~10x-charged
+            // POSTs competing with agent GETs for rate permits.
+            parser.pollOnce();
+            assertThat(client.posts).hasSize(WatchedAutoParser.MAX_PARSE_REQUESTS_PER_SWEEP);
+
+            // The next sweep drains the remainder: already-requested ids are deduped and do NOT
+            // consume the cap, so the 5 left-overs all go out.
+            parser.pollOnce();
+            assertThat(client.posts).hasSize(backlog);
+            assertThat(parser.parseRequested()).isEqualTo(backlog);
+        }
+    }
+
+    @Test
     void pollOnceContinuesPastAPlayerWhoseListingFails() {
         FakeClient client = new FakeClient();
         // Player 5's listing is absent (getJson 404s); player 6's succeeds with one unparsed match.

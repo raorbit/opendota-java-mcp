@@ -54,6 +54,15 @@ public final class WatchedAutoParser implements AutoCloseable {
     /** Recent matches per watched player scanned on each poll (older replays have expired and can't parse). */
     private static final int POLL_MATCH_LIMIT = 100;
     /**
+     * Cap on parse requests one proactive sweep may issue, across all watched players. Each request is
+     * a <em>synchronous</em>, rate-limited POST that OpenDota charges at roughly 10x a normal call, so
+     * an unbounded sweep over a fresh backlog (up to {@value #POLL_MATCH_LIMIT} per player) would burn
+     * hundreds of charged calls in one burst and compete with agent GETs for permits for its whole
+     * duration. Left-over unparsed matches are simply picked up by later sweeps (already-requested ids
+     * are deduped and don't consume the cap), so a backlog drains at a bounded pace instead.
+     */
+    static final int MAX_PARSE_REQUESTS_PER_SWEEP = 10;
+    /**
      * Upper bound on the dedup set so it can't grow without limit over the process lifetime. Successful
      * requests are kept (never pruned on success), so a long-lived sidecar would otherwise accumulate one
      * entry per watched match ever seen; once past this bound the set is cleared. A clear costs at most a
@@ -106,13 +115,17 @@ public final class WatchedAutoParser implements AutoCloseable {
      * once per process. A failed request is dropped from the dedup set so the poll can retry it later.
      * Never throws. Used by the off-thread {@link #pollOnce} sweep and by unit tests; the access-driven
      * request-serving path uses {@link #requestParseAsync} instead so a GET never blocks on the POST.
+     *
+     * @return whether this call attempted the POST ({@code false} = deduped as already requested), so
+     *         the sweep cap counts real upstream attempts, not dedup hits
      */
-    public void requestParse(long matchId) {
+    public boolean requestParse(long matchId) {
         if (!requested.add(matchId)) {
-            return;   // already requested (or another thread is requesting it now)
+            return false;   // already requested (or another thread is requesting it now)
         }
         boundRequested();
         doParse(matchId);
+        return true;
     }
 
     /**
@@ -163,16 +176,25 @@ public final class WatchedAutoParser implements AutoCloseable {
 
     /**
      * One proactive sweep: for each watched player, list their recent matches and request a parse for any
-     * that are unparsed. Best-effort per player — a failure for one player is logged and the sweep
-     * continues with the next. Package-visible so a test can drive a single deterministic sweep without
-     * the scheduler.
+     * that are unparsed, up to {@value #MAX_PARSE_REQUESTS_PER_SWEEP} parse POSTs per sweep (the rest
+     * wait for the next sweep — see the cap's javadoc). Best-effort per player — a failure for one
+     * player is logged and the sweep continues with the next. Package-visible so a test can drive a
+     * single deterministic sweep without the scheduler.
      */
     void pollOnce() {
+        int issued = 0;
         for (Long id : watchedIds) {
             String path = "/players/" + id + "/matches?project=version&limit=" + POLL_MATCH_LIMIT;
             try {
                 for (long matchId : unparsedMatchIds(client.getJson(path))) {
-                    requestParse(matchId);
+                    if (issued >= MAX_PARSE_REQUESTS_PER_SWEEP) {
+                        LOG.fine("watched auto-parse sweep reached its " + MAX_PARSE_REQUESTS_PER_SWEEP
+                                + "-request cap; remaining unparsed matches wait for the next sweep");
+                        return;
+                    }
+                    if (requestParse(matchId)) {
+                        issued++;
+                    }
                 }
             } catch (OpenDotaException e) {
                 LOG.log(Level.FINE, e, () -> "watched auto-parse poll could not list matches for player " + id);
