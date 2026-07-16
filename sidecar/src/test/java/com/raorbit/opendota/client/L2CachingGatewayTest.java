@@ -971,6 +971,32 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- W2b3: with refetchMillis=0 (re-fetch every access) an outage-serve leaves the stamp ----
+    // ---- untouched, so the operator's every-access choice is honoured even during the outage ----
+    @Test
+    void outageServeWithZeroIntervalLeavesStampUntouchedAndKeepsRetryingUpstream(@TempDir Path tmp)
+            throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        // watchedRefetchMillis = 0: the operator opted into re-fetch-on-every-access.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID)))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(store.get("/matches/777").expiresAt()).as("0 interval stores no stamp").isNull();
+
+            // Outage: the due re-fetch fails and the retained body is served...
+            client.bodies.remove("/matches/777");
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            int callsAfterOutageServe = client.calls.get();
+            // ...but advanceRefetchStampAfterFailure must NOT stamp a backoff: with a 0 interval the
+            // row stays stampless, and every further access genuinely re-attempts upstream.
+            assertThat(store.get("/matches/777").expiresAt()).as("stamp unchanged on a 0 interval").isNull();
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(client.calls.get()).as("a further access re-attempts upstream")
+                    .isEqualTo(callsAfterOutageServe + 1);
+        }
+    }
+
     // ---- W2c: a positive re-fetch interval serves an unparsed pinned match from L2 between re-checks ----
     @Test
     void unparsedPinnedBacksOffBetweenReFetchesThenUpgradesWhenDue(@TempDir Path tmp) throws Exception {

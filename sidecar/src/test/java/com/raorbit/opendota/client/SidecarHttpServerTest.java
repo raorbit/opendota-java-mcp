@@ -618,6 +618,34 @@ class SidecarHttpServerTest {
     }
 
     @Test
+    void statsIsTokenGatedLikeApi() throws Exception {
+        // /stats exposes operational counters (and confirms a sidecar lives here) — on a
+        // token-configured sidecar it must demand the same shared secret as /api.
+        try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "s3cret")) {
+            gated.start();
+            String b = "http://127.0.0.1:" + gated.port();
+
+            HttpResponse<String> missing = http.send(
+                    HttpRequest.newBuilder(URI.create(b + "/stats")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(missing.statusCode()).isEqualTo(401);
+
+            HttpResponse<String> wrong = http.send(
+                    HttpRequest.newBuilder(URI.create(b + "/stats"))
+                            .header("X-Sidecar-Token", "nope").GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(wrong.statusCode()).isEqualTo(401);
+
+            HttpResponse<String> ok = http.send(
+                    HttpRequest.newBuilder(URI.create(b + "/stats"))
+                            .header("X-Sidecar-Token", "s3cret").GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(ok.statusCode()).isEqualTo(200);
+            assertThat(ok.body()).contains("\"cacheHits\":");
+        }
+    }
+
+    @Test
     void tokenGatedSidecarRequiresMatchingHeaderForApiButNotHealth() throws Exception {
         stubUpstream("/api/heroes", 200, "[]");
         try (SidecarHttpServer gated = new SidecarHttpServer(0, new OpenDotaClient(null, upstreamBase), "s3cret")) {
