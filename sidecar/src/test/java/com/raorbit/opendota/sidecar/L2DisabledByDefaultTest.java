@@ -41,7 +41,7 @@ class L2DisabledByDefaultTest {
         // The public constructor targets the real API base, but this test never makes a call —
         // it only checks gateway construction and the on-disk db file.
         try (OpenDotaClient client = new OpenDotaClient(null)) {
-            L2CachingGateway gw = SidecarMain.maybeBuildGateway(client);
+            L2CachingGateway gw = SidecarMain.maybeBuildGateway(client, true);
             assertThat(gw).as("no gateway is built when the flag is off").isNull();
         }
         // No SQLite file (or its -wal/-shm siblings) was created.
@@ -73,7 +73,7 @@ class L2DisabledByDefaultTest {
         // The public constructor targets the real API base, but this test never makes a call —
         // it only checks gateway construction and the on-disk db file.
         try (OpenDotaClient client = new OpenDotaClient(null)) {
-            L2CachingGateway gw = SidecarMain.maybeBuildGateway(client);
+            L2CachingGateway gw = SidecarMain.maybeBuildGateway(client, true);
             assertThat(gw).as("a gateway is built when the flag is on").isNotNull();
             gw.close();
         }

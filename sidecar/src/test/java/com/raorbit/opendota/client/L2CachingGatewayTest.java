@@ -1162,6 +1162,33 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- W8b: a read-only sidecar (allowWrites=false) never issues parse requests, even with ----
+    // ---- watched players + auto-parse configured (the default-on knob must not override the lever) ----
+    @Test
+    void readOnlyGatewayNeverIssuesParseRequests(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        // Watched player + auto-parse ON (the default when watching) + refetch 0 so every access
+        // force-misses — but the gateway is built with allowWrites=false, so no auto-parser exists.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, watching(WATCHED_ID), 0L, true), false)) {
+            gw.get("/matches/777");
+            gw.get("/matches/777");
+            // startWatchedParsePoll must be a no-op too (no auto-parser to start).
+            gw.startWatchedParsePoll();
+            // Give a would-be async POST ample time to land before asserting none did.
+            Thread.sleep(150);
+            assertThat(client.posts).as("a read-only sidecar spends no write budget").isEmpty();
+            assertThat(gw.stats().parseRequested()).isZero();
+            assertThat(Thread.getAllStackTraces().keySet().stream()
+                    .anyMatch(t -> "watched-parse-poll".equals(t.getName()) && t.isAlive()))
+                    .as("no poll thread is spawned").isFalse();
+            // The archive itself still works read-only: the unparsed match is stored PINNED.
+            assertThat(store.get("/matches/777").classification()).isEqualTo("PINNED");
+        }
+    }
+
     // ---- W9: a /matches/<huge-id> unparsed watched body must NOT throw and must NOT request a parse ----
     @Test
     void hugeMatchIdDoesNotThrowOrRequestParse(@TempDir Path tmp) throws Exception {

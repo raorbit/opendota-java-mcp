@@ -62,8 +62,10 @@ public final class SidecarMain {
         }
         // Optional durable L2 tier (off by default). When enabled, wrap the client in the gateway;
         // if the SQLite store cannot open, log and fall back to the bare client rather than failing
-        // start-up — L2 is a best-effort accelerator, never a hard dependency.
-        L2CachingGateway gateway = maybeBuildGateway(client);
+        // start-up — L2 is a best-effort accelerator, never a hard dependency. allowWrites is threaded
+        // through so a read-only sidecar never constructs the auto-parser (which POSTs on its own
+        // initiative, outside the inbound-write gate the HTTP server enforces).
+        L2CachingGateway gateway = maybeBuildGateway(client, allowWrites);
 
         SidecarHttpServer server;
         try {
@@ -110,9 +112,10 @@ public final class SidecarMain {
     /**
      * Build the durable L2 gateway when the feature flag is on, else {@code null} (so the sidecar
      * opens no SQLite file and behaves exactly as today). A failure to open the store is logged and
-     * degrades to the bare client — the cache is an accelerator, not a dependency.
+     * degrades to the bare client — the cache is an accelerator, not a dependency. {@code allowWrites}
+     * false suppresses the watched auto-parser (see the gateway constructor).
      */
-    static L2CachingGateway maybeBuildGateway(OpenDotaClient client) {
+    static L2CachingGateway maybeBuildGateway(OpenDotaClient client, boolean allowWrites) {
         if (!L2Config.isEnabled()) {
             return null;
         }
@@ -120,7 +123,7 @@ public final class SidecarMain {
         try {
             L2Store store = new L2Store(config.dbPath(), L2Store.SCHEMA_VERSION, config.readPoolSize());
             LOG.info(() -> "L2 durable cache enabled at " + config.dbPath());
-            return new L2CachingGateway(client, store, config);
+            return new L2CachingGateway(client, store, config, allowWrites);
         } catch (SQLException e) {
             LOG.warning(() -> "L2 durable cache could not open " + config.dbPath() + " ("
                     + e.getClass().getSimpleName() + ": " + e.getMessage() + "); running without L2.");

@@ -109,16 +109,33 @@ public final class L2CachingGateway implements AutoCloseable {
     private final Set<String> storing = ConcurrentHashMap.newKeySet();
 
     public L2CachingGateway(OpenDotaClient client, L2Store store, L2Config config) {
+        this(client, store, config, true);
+    }
+
+    /**
+     * @param allowWrites whether this sidecar may issue writes at all (the operator's
+     *                    {@code OPENDOTA_SIDECAR_ALLOW_WRITES} lever). The auto-parser POSTs
+     *                    {@code /request/{id}} on its own initiative, so a read-only sidecar must not
+     *                    construct it — otherwise "read-only" would still spend the ~10×-charged write
+     *                    budget on the shared key via the watched-archive parse requests.
+     */
+    public L2CachingGateway(OpenDotaClient client, L2Store store, L2Config config, boolean allowWrites) {
         this.client = client;
         this.store = store;
         this.config = config;
         this.watchedPattern = buildWatchedPattern(config.watchedAccountIds());
-        // Auto-parse is active only when players are watched AND it is enabled (on by default). The poll
-        // is NOT started here — startWatchedParsePoll() does that from SidecarMain, so unit tests that
-        // construct a gateway never spawn a background thread.
-        this.autoParser = (watchedPattern != null && config.watchedAutoParse())
+        // Auto-parse is active only when players are watched AND it is enabled (on by default) AND the
+        // sidecar may write at all. The poll is NOT started here — startWatchedParsePoll() does that
+        // from SidecarMain, so unit tests that construct a gateway never spawn a background thread.
+        boolean autoParseConfigured = watchedPattern != null && config.watchedAutoParse();
+        this.autoParser = (allowWrites && autoParseConfigured)
                 ? new WatchedAutoParser(client, config.watchedAccountIds(), config.watchedParsePollMillis())
                 : null;
+        if (!allowWrites && autoParseConfigured) {
+            LOG.info(() -> "watched auto-parse is configured but writes are disabled "
+                    + "(OPENDOTA_SIDECAR_ALLOW_WRITES=false): the archive stays read-only and no "
+                    + "parse requests will be issued.");
+        }
         // The patch probe reads /constants/patch THROUGH the client, so it is served from L1 for its
         // ttlFor horizon (6h): a patch-check interval below that silently cannot observe a change any
         // faster — the knob looks effective but detection is still floored at the L1 TTL. Warn rather
