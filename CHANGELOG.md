@@ -3,6 +3,95 @@
 All notable changes to **opendota-mcp** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project aims to follow semantic versioning.
 
+## [1.3.0] - 2026-07-16
+
+The opt-in **HTTP (remote-MCP) transport**, the hardening from three review rounds, a
+protocol-level test safety net, and a single-sourced release version.
+
+### Added
+
+- **Opt-in HTTP (remote-MCP) transport.** `mvn -Phttp package` builds a separate
+  `opendota-mcp-1.3.0-http.jar` that serves the same 47 read tools over **Streamable HTTP** at
+  `/mcp`, so the server can be added through Claude's "Add custom connector → Remote MCP server
+  URL" dialog instead of being spawned over stdio. Activated at runtime with
+  `spring.profiles.active=http`; binds loopback (`127.0.0.1:8080`) and requires
+  `Authorization: Bearer <token>` (`OPENDOTA_HTTP_BEARER_TOKEN`, constant-time compared) by
+  default. `auth-mode=none` instances are protected by an anti-DNS-rebinding `Host` guard **and a
+  browser cross-origin (CSRF) guard** (`Sec-Fetch-Site` / `Origin`), and a **fail-closed startup
+  guard** refuses a non-loopback bind without a bearer token. TLS is terminated by a fronting
+  proxy/tunnel, never in the JVM. The **default build is untouched** — plain `mvn package` stays
+  pure stdio with no web server on the classpath, now enforced by a maven-enforcer ban. See
+  `docs/remote-connector.md` and `docker-compose.http.yml`.
+- **End-to-end MCP protocol smoke test.** A new test boots the real server as a child JVM on the
+  actual stdio transport and drives `initialize → tools/list → tools/call` over real pipes,
+  covering the MCP SDK wire path, the generated tool schemas, the json-schema-validator pin, and
+  stdout cleanliness at the protocol level — none of which the wiring test exercised.
+- `GET /stats` now reports **`l2OutageServe`**: requests served the retained watched-archive body
+  because the forced re-fetch failed (previously such a request double-counted as both an
+  `l2Miss` and an `l2Hit`, skewing the hit ratio during outages).
+
+### Changed
+
+- **The release version is single-sourced from the poms.** `spring.ai.mcp.server.version` is
+  resource-filtered from the pom at build time; the client `User-Agent` derives from the jar
+  manifest's `Implementation-Version` (with a dev-time fallback literal); and the release
+  workflow now refuses a tag unless the poms, the filtered property, and both fallback literals
+  all agree — the embedded version strings had silently drifted twice.
+- The proactive watched auto-parse sweep is **capped at 10 parse requests per sweep** (each is a
+  synchronous POST charged ~10× a normal call), so a fresh backlog drains across sweeps instead
+  of bursting hundreds of charged calls that compete with agent reads for rate permits.
+
+### Fixed
+
+- **A read-only sidecar no longer issues writes on its own initiative.**
+  `OPENDOTA_SIDECAR_ALLOW_WRITES=false` previously gated only inbound `POST`s: with watched
+  players configured, the auto-parser still POSTed `/request/{id}` under the shared key (both
+  from the background poll and the access-driven trigger). The lever now suppresses the
+  auto-parser entirely; the archive stays read-only.
+- **A parsed archived match of an un-watched player is reclaimed.** Un-watching a player only
+  reclaimed their *unparsed* archived matches; a *parsed* `PINNED` row always hit L2, so it
+  stayed pinned (and exempt from the main cap) forever. It is now re-classed `PERMANENT` on the
+  next access and governed by the main cache cap like any other match.
+- The sidecar warns when `OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS` is below the 60s L1 TTL of
+  `/matches/{id}` — the forced re-fetch reads through the client's L1 cache, so a smaller
+  interval is silently floored and cannot observe a parse any faster (mirrors the existing
+  patch-check floor warning).
+- Patch-scoped reads no longer serialize on the SQLite **write** connection: the not-due path of
+  the patch check reads a cached patch id instead of the meta table on every request, so L2-hit
+  reads stay parallel across the read pool.
+- A failed read-pragma during store open no longer leaks its SQLite connection.
+- L2 expiry reclamation (`evictExpired`) now uses a partial index on `expires_at` instead of a
+  full-table scan on every store, and the L1 `TtlCache` no longer allocates a throwaway encoded
+  copy of each body just to count its bytes.
+
+### Security
+
+- The **token-less sidecar** refuses browser cross-origin requests — a page could previously
+  drive reads and parse/refresh `POST`s at `http://127.0.0.1:31337` under the sidecar's key via
+  `fetch(..., {mode:'no-cors'})` — plus non-loopback `Host` headers (DNS rebinding) and literal or
+  percent-encoded path traversal. The `auth-mode=none` HTTP instance enforces the same Host and
+  cross-origin policy on its `/mcp` endpoint.
+- A caller-supplied **`api_key` query parameter is stripped** before the sidecar forwards a
+  request, so it can neither duplicate nor substitute the sidecar's own key on the shared hop.
+- The whole HTTP exchange is now **time-bounded** (request timeout only covered time-to-headers),
+  so an upstream that stalls mid-body can no longer wedge the single-flight path and every caller
+  queued behind it.
+- Bodies larger than the whole L2 byte budget are never stored (storing one would have evicted
+  the entire tier, or the entire watched archive, before the oversized row itself went).
+
+### Internal
+
+- Review-round hardening (PRs #29-#31), condensed: rows stored under an outdated classification
+  are treated as misses; patch-scoped stores are held off while L1 may still serve pre-bust
+  bodies; watched re-fetches and patch checks back off during upstream outages; `/heroStats` is
+  classified TTL rather than patch-pinned; `LIMIT ALL` / `FETCH FIRST n ROWS` are clamped in
+  place instead of appending a second limiter; forwarding-client timeouts cover the sidecar's
+  real service time; log purging skips live sibling processes; the wiring and client-copy guards
+  are exhaustive; docker base images are pinned by digest; CI covers the `-Phttp` profile.
+- New tests pin the `WITH`/CTE SQL guardrails (data-modifying CTEs are rejected), the
+  `/explorer` non-JSON passthrough, the async parse-request path and its shutdown race, the
+  outage re-serve with a 0 re-fetch interval, and the token gate on `/stats`.
+
 ## [1.2.0] - 2026-06-24
 
 Container packaging for both the MCP server and the shared sidecar, published to GHCR; a configurable
