@@ -324,14 +324,20 @@ public final class L2CachingGateway implements AutoCloseable {
                         return null;
                     }
                 } else if (watchedPattern == null || !watchedPattern.matcher(e.body()).find()) {
-                    // A PARSED pinned row whose player is no longer watched. A parsed row carries no
-                    // re-fetch stamp, so serving it here would keep it PINNED forever — maybeStore
-                    // (where the re-class happens) only runs on a miss — leaving an orphan that is
-                    // exempt from the main cap and un-evictable under the default unlimited watched
-                    // budget. Force a miss: the re-fetch falls through maybeStore's parsed non-watched
-                    // branch and is re-stored PERMANENT (put() nets the PINNED→PERMANENT transition,
-                    // moving the row under the main cap).
-                    return null;
+                    // A PARSED pinned row whose player is no longer watched. A parsed row normally
+                    // carries no re-fetch stamp, so serving it here would keep it PINNED forever —
+                    // maybeStore (where the re-class happens) only runs on a miss — leaving an orphan
+                    // that is exempt from the main cap and un-evictable under the default unlimited
+                    // watched budget. Force a miss: the re-fetch falls through maybeStore's parsed
+                    // non-watched branch and is re-stored PERMANENT (put() nets the PINNED→PERMANENT
+                    // transition, moving the row under the main cap). A LIVE stamp is honoured exactly
+                    // like the unparsed branch above: after a failed re-class re-fetch the outage
+                    // fallback stamps a backoff (advanceRefetchStampAfterFailure), and force-missing
+                    // straight past it would re-pay the dead upstream on every access for the whole
+                    // outage. Null = due now, so the healthy-path re-class stays immediate.
+                    if (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis()) {
+                        return null;
+                    }
                 }
             }
             return e;

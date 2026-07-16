@@ -1123,6 +1123,47 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- W2g: a parsed orphan honours the outage backoff stamp instead of re-fetching per access ----
+    @Test
+    void parsedOrphanBacksOffDuringAnOutageInsteadOfRefetchingEveryAccess(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_PARSED);
+        // Archive the parsed match PINNED while the player is watched.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, watching(WATCHED_ID), Duration.ofHours(1).toMillis()))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+        }
+        // Un-watch + an upstream outage. The re-class force-miss fails upstream, so the outage
+        // fallback serves the retained body and stamps a backoff — which the parsed-orphan branch
+        // must then HONOUR: without that, every access during the outage re-pays the full upstream
+        // attempt (timeout + retries + a rate permit), exactly what the backoff exists to prevent.
+        client.bodies.remove("/matches/777");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, L2Config.Watched.NONE, Duration.ofHours(1).toMillis()))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(gw.stats().l2OutageServe()).isEqualTo(1);
+            int callsAfterOutageServe = client.calls.get();
+            assertThat(store.get("/matches/777").expiresAt()).as("backoff stamped").isNotNull();
+
+            // Within the backoff window the orphan serves straight from L2 — no upstream attempts.
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(client.calls.get()).as("no further upstream attempts within the backoff")
+                    .isEqualTo(callsAfterOutageServe);
+
+            // Outage ends and the stamp elapses: the next access re-fetches and re-classes PERMANENT.
+            L2Store.Entry stamped = store.get("/matches/777");
+            store.put("/matches/777", stamped.body(), com.raorbit.opendota.sidecar.Classification.PINNED,
+                    stamped.storedAt(), 1L, L2Store.SCHEMA_VERSION, null);
+            client.bodies.put("/matches/777", WATCHED_MATCH_PARSED);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(store.get("/matches/777").classification()).isEqualTo("PERMANENT");
+            assertThat(store.pinnedRowCount()).isZero();
+        }
+    }
+
     // ---- W3: a parsed watched match serves straight from L2 on the 2nd get ----
     @Test
     void parsedWatchedMatchServesFromL2(@TempDir Path tmp) throws Exception {
