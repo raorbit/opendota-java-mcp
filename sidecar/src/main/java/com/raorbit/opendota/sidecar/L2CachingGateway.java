@@ -582,7 +582,6 @@ public final class L2CachingGateway implements AutoCloseable {
             try {
                 String observed = observeCurrentPatch();
                 String stored = store.storedPatchId();
-                cachedPatchId = observed != null ? observed : stored;
                 if (observed != null) {
                     if (!observed.equals(stored)) {
                         int deleted = store.patchBust();
@@ -610,6 +609,12 @@ public final class L2CachingGateway implements AutoCloseable {
                     lastPatchCheckMillis = System.currentTimeMillis();
                     lastPatchCheckFailed = true;
                 }
+                // Publish to concurrent not-due readers only AFTER the bust ran and lastPatchBustMillis
+                // is armed. Publishing the new id any earlier would let a reader miss on the per-row
+                // guard, fetch a pre-patch body its L1 still holds, and store it stamped with the NEW
+                // id while withinPostBustL1Window still reads an unarmed bust stamp — pinning stale
+                // static data for the whole patch cycle (the exact bug the hold-off window prevents).
+                cachedPatchId = observed != null ? observed : stored;
                 return observed != null ? observed : stored;
             } catch (SQLException ex) {
                 recordError("L2 patch check", "/constants/patch", ex);
