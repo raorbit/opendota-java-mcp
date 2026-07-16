@@ -1,6 +1,5 @@
 package com.raorbit.opendota.client;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -114,8 +113,9 @@ public final class TtlCache {
             return;
         }
         // Measure real UTF-8 bytes (not UTF-16 char count) so this budget uses the
-        // same unit as the documented byte bound and the response-size cap.
-        int size = json.getBytes(StandardCharsets.UTF_8).length;
+        // same unit as the documented byte bound and the response-size cap — counted
+        // without materializing a throwaway encoded copy of the whole body.
+        int size = utf8Length(json);
         // Per-entry ceiling: a single body too large to ever fit the budget is
         // not cached, so it cannot dominate or thrash the cache.
         if (size > maxBytes) {
@@ -159,6 +159,33 @@ public final class TtlCache {
             }
             removeEntry(e.getKey(), e.getValue());
         }
+    }
+
+    /**
+     * The exact length of {@code s} encoded as UTF-8, computed without allocating the encoded
+     * {@code byte[]} (which would be a full-body copy on every {@link #put}). Agrees with
+     * {@code s.getBytes(UTF_8).length} for every input, including unpaired surrogates, which Java's
+     * UTF-8 encoder replaces with a single {@code '?'} byte — so the byte accounting stays exact.
+     */
+    static int utf8Length(String s) {
+        int bytes = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) {
+                bytes += 1;
+            } else if (c < 0x800) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c)
+                    && i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) {
+                bytes += 4;   // a valid surrogate pair encodes as one 4-byte sequence
+                i++;
+            } else if (Character.isSurrogate(c)) {
+                bytes += 1;   // unpaired surrogate: the encoder emits its 1-byte replacement, '?'
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
     }
 
     /** Remove an entry only if it is still the one mapped, keeping the byte tally in step. */
