@@ -206,6 +206,11 @@ public final class L2Store implements AutoCloseable {
                     + "schema_version INTEGER NOT NULL, "
                     + "patch_id TEXT)");
             st.execute("CREATE INDEX IF NOT EXISTS idx_cache_entries_stored_at ON cache_entries (stored_at)");
+            // Partial index so evictExpired's DELETE (WHERE expires_at IS NOT NULL AND expires_at <= ?)
+            // is an index range scan instead of a full-table scan on every store. IF NOT EXISTS on the
+            // stamp-matching open path too, so pre-existing databases pick it up without a schema bump.
+            st.execute("CREATE INDEX IF NOT EXISTS idx_cache_entries_expires_at "
+                    + "ON cache_entries (expires_at) WHERE expires_at IS NOT NULL");
         }
     }
 
