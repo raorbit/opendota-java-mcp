@@ -19,6 +19,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -62,11 +64,14 @@ class McpStdioProtocolSmokeTest {
         try {
             child = launchServer(tmp, stub.getAddress().getPort());
             StringBuilder stderr = drainStderr(child);
+            // stdout is drained by its own daemon thread into a queue and consumed here with a
+            // bounded poll: the test thread must NEVER block in an uninterruptible pipe read, or a
+            // silently-hung child would defeat both the deadline below and @Timeout (whose interrupt
+            // cannot unblock a pipe read), leaving the finally unreached and the child orphaned.
+            BlockingQueue<String> fromChild = drainStdout(child);
 
             try (BufferedWriter toChild = new BufferedWriter(new OutputStreamWriter(
-                         child.getOutputStream(), StandardCharsets.UTF_8));
-                 BufferedReader fromChild = new BufferedReader(new InputStreamReader(
-                         child.getInputStream(), StandardCharsets.UTF_8))) {
+                         child.getOutputStream(), StandardCharsets.UTF_8))) {
 
                 // --- initialize ---
                 send(toChild, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{"
@@ -137,13 +142,18 @@ class McpStdioProtocolSmokeTest {
         String java = Paths.get(System.getProperty("java.home"), "bin", "java").toString();
         Path argFile = tmp.resolve("server.args");
         String classpath = System.getProperty("java.class.path");
+        // The child's log goes OUTSIDE the JUnit-managed @TempDir: on Windows the just-destroyed
+        // child (or an antivirus scan of its log) can hold the file handle a beat longer than the
+        // @TempDir cleanup waits, failing the whole test on teardown even though the protocol run
+        // passed. target/ carries no cleanup contract, so a briefly-lingering handle is harmless.
+        Path log = Paths.get("target", "mcp-smoke-" + System.nanoTime() + ".log").toAbsolutePath();
         List<String> args = List.of(
                 "-cp", quoteForArgFile(classpath),
                 "-Xshare:off",
                 "-Dopendota.sidecar-enabled=true",
                 "-Dopendota.sidecar-host=127.0.0.1",
                 "-Dopendota.sidecar-port=" + stubPort,
-                "-Dlogging.file.name=" + quoteForArgFile(tmp.resolve("smoke.log").toString()),
+                "-Dlogging.file.name=" + quoteForArgFile(log.toString()),
                 OpenDotaMcpApplication.class.getName());
         Files.write(argFile, args, StandardCharsets.UTF_8);
         return new ProcessBuilder(java, "@" + argFile).start();
@@ -160,18 +170,31 @@ class McpStdioProtocolSmokeTest {
         toChild.flush();
     }
 
+    /** Queue sentinel marking the child's stdout hitting EOF (the child exited or closed the pipe). */
+    private static final String STDOUT_EOF = " <child-stdout-eof>";
+
     /**
-     * Read the next JSON-RPC <em>response</em> line for {@code expectedId} from the child's stdout.
-     * Every line on stdout must parse as JSON — the transport owns the stream, so a stray log line
-     * is itself a bug this test exists to catch. Notifications/requests from the server (no matching
-     * id) are skipped; EOF means the child died, so the buffered stderr is surfaced for diagnosis.
+     * Read the next JSON-RPC <em>response</em> line for {@code expectedId} from the child's queued
+     * stdout, waiting at most {@value #CHILD_START_TIMEOUT_SECONDS}s. Every line on stdout must parse
+     * as JSON — the transport owns the stream, so a stray log line is itself a bug this test exists
+     * to catch. Notifications/requests from the server (no matching id) are skipped; EOF means the
+     * child died, so the buffered stderr is surfaced for diagnosis. The bounded queue poll (never a
+     * raw pipe read on this thread) is what makes the deadline — and a clean child teardown in the
+     * caller's finally — actually reachable when the child hangs without output.
      */
-    private static JsonNode readResponse(BufferedReader fromChild, int expectedId,
+    private static JsonNode readResponse(BlockingQueue<String> fromChild, int expectedId,
                                          StringBuilder stderr, Process child) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(CHILD_START_TIMEOUT_SECONDS);
-        while (System.nanoTime() < deadline) {
-            String line = fromChild.readLine();
+        while (true) {
+            long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            String line = remainingMillis > 0
+                    ? fromChild.poll(remainingMillis, TimeUnit.MILLISECONDS)
+                    : null;
             if (line == null) {
+                throw new AssertionError("timed out waiting for response id " + expectedId
+                        + " (child alive=" + child.isAlive() + "); stderr:\n" + stderr);
+            }
+            if (STDOUT_EOF.equals(line)) {
                 throw new AssertionError("server exited (code "
                         + (child.isAlive() ? "still-alive" : String.valueOf(child.exitValue()))
                         + ") before answering id " + expectedId + "; stderr:\n" + stderr);
@@ -191,8 +214,27 @@ class McpStdioProtocolSmokeTest {
             }
             // A server-initiated notification/request (e.g. a log message) — skip and keep reading.
         }
-        throw new AssertionError("timed out waiting for response id " + expectedId
-                + "; stderr:\n" + stderr);
+    }
+
+    /** Drain the child's stdout on a daemon thread into a queue, marking EOF with a sentinel. */
+    private static BlockingQueue<String> drainStdout(Process child) {
+        BlockingQueue<String> lines = new LinkedBlockingQueue<>();
+        Thread t = new Thread(() -> {
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(
+                    child.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    lines.add(line);
+                }
+            } catch (Exception ignored) {
+                // fall through to the EOF sentinel; the consumer surfaces the child's stderr
+            } finally {
+                lines.add(STDOUT_EOF);
+            }
+        }, "smoke-test-stdout-drain");
+        t.setDaemon(true);
+        t.start();
+        return lines;
     }
 
     /** Drain the child's stderr on a daemon thread (avoids pipe-buffer deadlock) into a buffer. */
