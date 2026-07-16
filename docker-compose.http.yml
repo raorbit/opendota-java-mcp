@@ -21,7 +21,7 @@ services:
       # the runnable '-http' classified jar into the image (an empty/unset arg builds stdio).
       args:
         MAVEN_PROFILE: http
-    image: opendota-mcp-http:1.2.0
+    image: opendota-mcp-http:1.3.0
     init: true
     depends_on:
       # Wait for the sidecar to be HEALTHY (it has a healthcheck), not just started, so the

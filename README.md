@@ -19,7 +19,7 @@ exception is `run_sql_explorer`, which slims OpenDota's verbose `/explorer` resu
 down to `{command, rowCount, fields, rows, sql_executed}`.
 
 The build produces a single runnable Spring Boot jar
-(`target/opendota-mcp-1.2.0.jar`) that MCP clients launch via `java -jar`.
+(`target/opendota-mcp-1.3.0.jar`) that MCP clients launch via `java -jar`.
 
 ## Tools
 
@@ -137,12 +137,12 @@ strings**, expanded into repeated query params.
 mvn clean package
 ```
 
-This produces the runnable jar at `target/opendota-mcp-1.2.0.jar`.
+This produces the runnable jar at `target/opendota-mcp-1.3.0.jar`.
 
 ## Run
 
 ```sh
-java -jar target/opendota-mcp-1.2.0.jar
+java -jar target/opendota-mcp-1.3.0.jar
 ```
 
 The server speaks the MCP **stdio** transport: it reads JSON-RPC requests on
@@ -178,8 +178,8 @@ port-publish guarantee the sidecar relies on).
 ### MCP server image
 
 ```sh
-docker build -t opendota-mcp:1.2.0 .
-# or: docker pull ghcr.io/raorbit/opendota-mcp:1.2.0
+docker build -t opendota-mcp:1.3.0 .
+# or: docker pull ghcr.io/raorbit/opendota-mcp:1.3.0
 ```
 
 The server is a **stdio** process, so an MCP client launches it with `docker run -i --rm`
@@ -193,7 +193,7 @@ clients do not pass the host environment through:
   "mcpServers": {
     "opendota": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "--init", "-e", "OPENDOTA_API_KEY", "ghcr.io/raorbit/opendota-mcp:1.2.0"],
+      "args": ["run", "-i", "--rm", "--init", "-e", "OPENDOTA_API_KEY", "ghcr.io/raorbit/opendota-mcp:1.3.0"],
       "env": { "OPENDOTA_API_KEY": "<optional-uuid-or-omit>" }
     }
   }
@@ -234,7 +234,7 @@ Point agents at it in one of two ways:
      --network opendota-java-mcp_opendota \
      -e OPENDOTA_SIDECAR_ENABLED=true -e OPENDOTA_SIDECAR_HOST=sidecar \
      -e OPENDOTA_SIDECAR_TOKEN -e OPENDOTA_API_KEY \
-     ghcr.io/raorbit/opendota-mcp:1.2.0
+     ghcr.io/raorbit/opendota-mcp:1.3.0
    ```
    (Find the real network name with `docker network ls`; Compose names it
    `<project>_opendota`.) The main server is intentionally **not** a Compose service — it is a
@@ -332,10 +332,10 @@ agent forwards its calls to it, so the real budget is honoured exactly once.
 
 ```sh
 # build it (a separate, dependency-light project under sidecar/)
-mvn -f sidecar/pom.xml clean package    # -> sidecar/target/opendota-sidecar-1.2.0.jar
+mvn -f sidecar/pom.xml clean package    # -> sidecar/target/opendota-sidecar-1.3.0.jar
 
 # run it once per machine (it holds the key; the agents then don't need one)
-OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.2.0.jar
+OPENDOTA_API_KEY=<uuid> java -jar sidecar/target/opendota-sidecar-1.3.0.jar
 ```
 
 Then point each agent at it by setting `opendota.sidecar-enabled=true` (and leaving
@@ -365,7 +365,7 @@ populated on access; it does not backfill a player's full match history.
 # Resolve names to Steam32 account_ids first (search_players), then start the sidecar with:
 OPENDOTA_SIDECAR_L2=true \
 OPENDOTA_SIDECAR_L2_WATCHED_PLAYERS=12345,67890 \
-java -jar sidecar/target/opendota-sidecar-1.2.0.jar
+java -jar sidecar/target/opendota-sidecar-1.3.0.jar
 ```
 
 Behaviour:

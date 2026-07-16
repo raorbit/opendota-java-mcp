@@ -42,7 +42,7 @@ public class OpenDotaClient implements AutoCloseable {
      * so at runtime the User-Agent tracks the release automatically; this literal is only the dev-time
      * fallback, and release.yml refuses to tag unless it matches the release version.
      */
-    private static final String FALLBACK_VERSION = "1.2.0";
+    private static final String FALLBACK_VERSION = "1.3.0";
     private static final String USER_AGENT = "opendota-mcp/" + clientVersion();
 
     /**

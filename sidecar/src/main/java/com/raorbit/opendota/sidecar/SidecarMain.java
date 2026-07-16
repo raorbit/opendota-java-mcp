@@ -23,7 +23,7 @@ import java.util.logging.Logger;
  * player refreshes) through the sidecar; it holds the key and owns the one rate limiter and cache.
  *
  * <p>Run it once per machine before launching the agents:
- * <pre>{@code OPENDOTA_API_KEY=<uuid> java -jar opendota-sidecar-1.2.0.jar}</pre>
+ * <pre>{@code OPENDOTA_API_KEY=<uuid> java -jar opendota-sidecar-1.3.0.jar}</pre>
  *
  * <p>This process is a plain HTTP server, not the stdio MCP transport, so logging to
  * the console is fine; redirect it to a file if you run it in the background.
