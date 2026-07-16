@@ -3,7 +3,9 @@
 An [OpenDota](https://docs.opendota.com/) [Model Context Protocol (MCP)](https://modelcontextprotocol.io)
 server implemented in Java with [Spring AI](https://docs.spring.io/spring-ai/reference/).
 It exposes read-only OpenDota / Dota 2 data (players, matches, heroes, game
-constants) to MCP clients such as Claude over the **stdio** transport.
+constants) to MCP clients such as Claude over the **stdio** transport, with an
+opt-in **HTTP (remote-MCP) transport** for Claude's remote-connector dialog — see
+[Remote MCP / HTTP transport](#remote-mcp--http-transport-opt-in).
 
 ## Overview
 
@@ -146,6 +148,25 @@ java -jar target/opendota-mcp-1.2.0.jar
 The server speaks the MCP **stdio** transport: it reads JSON-RPC requests on
 stdin and writes responses on stdout. It is intended to be launched by an MCP
 client, not run interactively.
+
+## Remote MCP / HTTP transport (opt-in)
+
+The server can also run as a **remote MCP server** over Streamable HTTP, so it can be
+added via Claude's "Add custom connector → Remote MCP server URL" dialog instead of
+being spawned as a local process. This mode is fully opt-in and built separately —
+the default build and the stdio behaviour above are untouched:
+
+```sh
+mvn -Phttp package          # -> target/opendota-mcp-<version>-http.jar (the runnable http jar)
+OPENDOTA_HTTP_BEARER_TOKEN=<secret> java -Dspring.profiles.active=http -jar target/opendota-mcp-<version>-http.jar
+```
+
+It serves the same 47 tools on a single `/mcp` endpoint, bound to loopback
+(`127.0.0.1:8080`) and gated by a bearer token by default, with a fail-closed startup
+guard against exposing the endpoint unauthenticated. TLS is terminated by a fronting
+proxy/tunnel (cloudflared, Caddy), never in the JVM. See
+[`docs/remote-connector.md`](docs/remote-connector.md) for the full setup, auth modes,
+and tunnel examples, and `docker-compose.http.yml` for a containerized variant.
 
 ## Run with Docker
 
