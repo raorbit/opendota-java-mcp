@@ -932,7 +932,10 @@ class L2CachingGatewayTest {
             // unparsed PINNED row fails, but the retained body is served rather than propagating the error.
             client.bodies.remove("/matches/777");
             assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
-            assertThat(gw.stats().l2Hit()).as("served from the archive after the re-fetch failed").isEqualTo(1);
+            // Counted as its own outage-serve, NOT as an l2Hit — the request already counted an l2Miss
+            // for the attempt, and double-counting both sides skewed the hit ratio during outages.
+            assertThat(gw.stats().l2OutageServe()).as("served from the archive after the re-fetch failed").isEqualTo(1);
+            assertThat(gw.stats().l2Hit()).isZero();
 
             // A non-archived path with no stored row still propagates the upstream error.
             assertThatThrownBy(() -> gw.get("/matches/999")).isInstanceOf(OpenDotaException.class);

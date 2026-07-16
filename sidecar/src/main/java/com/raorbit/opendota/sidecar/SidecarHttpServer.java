@@ -214,6 +214,7 @@ public final class SidecarHttpServer implements AutoCloseable {
                         .append(",\"l2PatchBust\":").append(l2.l2PatchBust())
                         .append(",\"l2Error\":").append(l2.l2Error())
                         .append(",\"noStore\":").append(l2.noStore())
+                        .append(",\"l2OutageServe\":").append(l2.l2OutageServe())
                         .append(",\"pinnedRows\":").append(l2.pinnedRows())
                         .append(",\"pinnedBytes\":").append(l2.pinnedBytes())
                         .append(",\"parseRequested\":").append(l2.parseRequested())

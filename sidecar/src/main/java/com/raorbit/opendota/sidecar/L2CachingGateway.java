@@ -75,6 +75,13 @@ public final class L2CachingGateway implements AutoCloseable {
     // --- counters (spec §8) ---
     private final AtomicLong l2Hit = new AtomicLong();
     private final AtomicLong l2Miss = new AtomicLong();
+    /**
+     * Requests served the retained PINNED body because the forced re-fetch failed (an upstream
+     * outage). Counted separately from {@code l2Hit} so one outage-served request no longer bumps
+     * both {@code l2Miss} (the attempt) and {@code l2Hit} (the fallback) — a double count that made
+     * the hit ratio lie during exactly the window the archive is meant to shine.
+     */
+    private final AtomicLong l2OutageServe = new AtomicLong();
     private final AtomicLong l2Store = new AtomicLong();
     private final AtomicLong l2WatchedStore = new AtomicLong();
     private final AtomicLong l2StoreSkippedUnparsed = new AtomicLong();
@@ -255,7 +262,7 @@ public final class L2CachingGateway implements AutoCloseable {
                 // permit — defeating the documented at-most-once-per-interval bound exactly when
                 // the archive is supposed to ride out the outage.
                 advanceRefetchStampAfterFailure(path, stale);
-                l2Hit.incrementAndGet();
+                l2OutageServe.incrementAndGet();
                 return stale.body();
             }
             throw ex;
@@ -822,18 +829,21 @@ public final class L2CachingGateway implements AutoCloseable {
      * on each access until it parses (see the upgrade path in {@link #maybeStore}), so this can exceed the
      * number of archived matches. {@code pinnedRows}/{@code pinnedBytes} are the store's current watched-
      * archive totals (the durable, deduplicated size of the archive against its budget). {@code parseRequested}
-     * /{@code parseErrors} count auto-parse requests issued / failed (both {@code 0} when auto-parse is off).
+     * /{@code parseErrors} count auto-parse requests issued / failed (both {@code 0} when auto-parse is
+     * off). {@code l2OutageServe} counts requests served the retained PINNED body after a failed forced
+     * re-fetch (each also counted an {@code l2Miss} for the attempt, but never an {@code l2Hit}).
      */
     public record L2Stats(long l2Hit, long l2Miss, long l2Store, long l2WatchedStore,
                           long l2StoreSkippedUnparsed, long l2PatchBust, long l2Error, long noStore,
-                          long pinnedRows, long pinnedBytes, long parseRequested, long parseErrors) {
+                          long l2OutageServe, long pinnedRows, long pinnedBytes,
+                          long parseRequested, long parseErrors) {
     }
 
     /** Snapshot the current counters. */
     public L2Stats stats() {
         return new L2Stats(l2Hit.get(), l2Miss.get(), l2Store.get(), l2WatchedStore.get(),
                 l2StoreSkippedUnparsed.get(), l2PatchBust.get(), l2Error.get(), noStore.get(),
-                store.pinnedRowCount(), store.pinnedBodyBytes(),
+                l2OutageServe.get(), store.pinnedRowCount(), store.pinnedBodyBytes(),
                 autoParser == null ? 0L : autoParser.parseRequested(),
                 autoParser == null ? 0L : autoParser.parseErrors());
     }
