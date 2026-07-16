@@ -299,6 +299,52 @@ class SidecarHttpServerTest {
     }
 
     @Test
+    void callerSuppliedApiKeyIsStrippedBeforeForwarding() throws Exception {
+        // The sidecar owns the API key; a caller-supplied api_key param must never ride the shared
+        // hop (on a keyed sidecar it would be forwarded as a duplicate parameter next to the real one).
+        stubUpstream("/api/heroes", 200, "[]");
+        stubUpstream("/api/proMatches", 200, "[]");
+
+        assertThat(get("/api/heroes?api_key=EVIL&foo=1").statusCode()).isEqualTo(200);
+        // Only api_key in the query -> forwarded with no query at all (no dangling '?').
+        assertThat(get("/api/proMatches?api_key=EVIL").statusCode()).isEqualTo(200);
+
+        assertThat(upstreamReceived).containsExactly("/api/heroes?foo=1", "/api/proMatches");
+    }
+
+    @Test
+    void percentEncodedApiKeySpellingIsStrippedToo() throws Exception {
+        // %61pi_key decodes to api_key: an encoded NAME must not slip past the strip and reach a
+        // decoding upstream as a second api_key parameter.
+        stubUpstream("/api/heroes", 200, "[]");
+
+        assertThat(get("/api/heroes?%61pi_key=EVIL&foo=1").statusCode()).isEqualTo(200);
+
+        assertThat(upstreamReceived).containsExactly("/api/heroes?foo=1");
+    }
+
+    @Test
+    void keyedSidecarForwardsOnlyItsOwnApiKey() throws Exception {
+        String sidecarKey = "00000000-1111-2222-3333-444444444444";
+        stubUpstream("/api/heroes", 200, "[]");
+        try (SidecarHttpServer keyed = new SidecarHttpServer(0, new OpenDotaClient(sidecarKey, upstreamBase))) {
+            keyed.start();
+            HttpResponse<String> r = http.send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + keyed.port()
+                            + "/api/heroes?api_key=EVIL")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(r.statusCode()).isEqualTo(200);
+        }
+        // Exactly one api_key reached the upstream — the sidecar's, not the caller's.
+        assertThat(upstreamReceived).hasSize(1);
+        assertThat(upstreamReceived.get(0))
+                .contains("api_key=" + sidecarKey)
+                .doesNotContain("EVIL");
+        assertThat(upstreamReceived.get(0).indexOf("api_key"))
+                .isEqualTo(upstreamReceived.get(0).lastIndexOf("api_key"));
+    }
+
+    @Test
     void upstreamErrorStatusIsMirrored() throws Exception {
         stubUpstream("/api/players/999", 404, "{\"error\":\"Not Found\"}");
 

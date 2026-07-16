@@ -8,10 +8,12 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -388,8 +390,42 @@ public final class SidecarHttpServer implements AutoCloseable {
                 return null;
             }
         }
-        String query = exchange.getRequestURI().getRawQuery();
+        String query = stripCallerApiKey(exchange.getRequestURI().getRawQuery());
         return query == null ? path : path + "?" + query;
+    }
+
+    /**
+     * Drop any caller-supplied {@code api_key} parameter from the raw query before forwarding. The
+     * sidecar owns the key: its keyed client appends its own {@code api_key} to the upstream URL, so a
+     * caller's copy would ride along as a duplicate parameter — at best confusing the upstream's query
+     * parsing, at worst letting a caller substitute a key of its choosing on the shared hop. Parameter
+     * names are percent-decoded before comparison so an encoded spelling ({@code %61pi_key}) cannot
+     * slip past; every other parameter is forwarded byte-for-byte. Returns {@code null} when nothing
+     * (or only {@code api_key}) remains, so the path is forwarded without a dangling {@code ?}.
+     */
+    static String stripCallerApiKey(String rawQuery) {
+        if (rawQuery == null || rawQuery.isEmpty()) {
+            return null;
+        }
+        StringJoiner kept = new StringJoiner("&");
+        for (String param : rawQuery.split("&")) {
+            int eq = param.indexOf('=');
+            String rawName = eq >= 0 ? param.substring(0, eq) : param;
+            String name;
+            try {
+                name = URLDecoder.decode(rawName, StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException malformedEncoding) {
+                name = rawName;   // undecodable — compare as-is; it cannot be a disguised api_key
+            }
+            if ("api_key".equalsIgnoreCase(name)) {
+                continue;
+            }
+            if (!param.isEmpty()) {
+                kept.add(param);
+            }
+        }
+        String result = kept.toString();
+        return result.isEmpty() ? null : result;
     }
 
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
