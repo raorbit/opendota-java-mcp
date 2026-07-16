@@ -112,7 +112,13 @@ public final class L2Store implements AutoCloseable {
         try {
             for (int i = 0; i < size; i++) {
                 Connection c = DriverManager.getConnection(url);
-                applyReadPragmas(c);
+                try {
+                    applyReadPragmas(c);
+                } catch (SQLException e) {
+                    // c is not yet pooled, so the catch below can't reach it — close it here or leak it.
+                    closeOne(c);
+                    throw e;
+                }
                 pool.add(c);
             }
             return pool;
