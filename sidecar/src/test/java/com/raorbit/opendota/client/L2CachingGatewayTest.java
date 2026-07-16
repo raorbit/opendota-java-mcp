@@ -368,6 +368,51 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- A sub-L1-TTL watched re-fetch interval warns that it is floored (mirrors the patch floor) ----
+    @Test
+    void subL1WatchedRefetchIntervalWarnsAboutTheFloor(@TempDir Path tmp) throws Exception {
+        java.util.logging.Logger log =
+                java.util.logging.Logger.getLogger(L2CachingGateway.class.getName());
+        List<java.util.logging.LogRecord> records = new CopyOnWriteArrayList<>();
+        java.util.logging.Handler capture = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        log.addHandler(capture);
+        try (CountingClient client = new CountingClient()) {
+            // 30s < the 60s L1 TTL of /matches/{id}: the forced re-fetch reads through L1, so the knob
+            // is silently floored — the constructor must warn.
+            try (L2Store store = new L2Store(tmp.resolve("warn.db"), L2Store.SCHEMA_VERSION);
+                 L2CachingGateway gw = new L2CachingGateway(client, store,
+                         config(tmp.resolve("warn.db"), watching(WATCHED_ID), 30_000L))) {
+                assertThat(records).anySatisfy(r -> {
+                    assertThat(r.getLevel()).isEqualTo(java.util.logging.Level.WARNING);
+                    assertThat(r.getMessage()).contains("watched re-fetch interval");
+                });
+            }
+            // At/above the TTL (or with no watched players) there is nothing to warn about.
+            records.clear();
+            try (L2Store store = new L2Store(tmp.resolve("ok.db"), L2Store.SCHEMA_VERSION);
+                 L2CachingGateway gw = new L2CachingGateway(client, store,
+                         config(tmp.resolve("ok.db"), watching(WATCHED_ID), Duration.ofHours(1).toMillis()))) {
+                assertThat(records).noneSatisfy(r ->
+                        assertThat(r.getMessage()).contains("watched re-fetch interval"));
+            }
+        } finally {
+            log.removeHandler(capture);
+        }
+    }
+
     // ---- Gate 5: per-row stale patch_id is treated as a miss ----
     @Test
     void perRowStalePatchIdIsTreatedAsMiss(@TempDir Path tmp) throws Exception {
@@ -887,7 +932,10 @@ class L2CachingGatewayTest {
             // unparsed PINNED row fails, but the retained body is served rather than propagating the error.
             client.bodies.remove("/matches/777");
             assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
-            assertThat(gw.stats().l2Hit()).as("served from the archive after the re-fetch failed").isEqualTo(1);
+            // Counted as its own outage-serve, NOT as an l2Hit — the request already counted an l2Miss
+            // for the attempt, and double-counting both sides skewed the hit ratio during outages.
+            assertThat(gw.stats().l2OutageServe()).as("served from the archive after the re-fetch failed").isEqualTo(1);
+            assertThat(gw.stats().l2Hit()).isZero();
 
             // A non-archived path with no stored row still propagates the upstream error.
             assertThatThrownBy(() -> gw.get("/matches/999")).isInstanceOf(OpenDotaException.class);
@@ -920,6 +968,32 @@ class L2CachingGatewayTest {
             assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
             assertThat(client.calls.get()).as("no further upstream attempts within the backoff window")
                     .isEqualTo(callsAfterFirstOutageServe);
+        }
+    }
+
+    // ---- W2b3: with refetchMillis=0 (re-fetch every access) an outage-serve leaves the stamp ----
+    // ---- untouched, so the operator's every-access choice is honoured even during the outage ----
+    @Test
+    void outageServeWithZeroIntervalLeavesStampUntouchedAndKeepsRetryingUpstream(@TempDir Path tmp)
+            throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        // watchedRefetchMillis = 0: the operator opted into re-fetch-on-every-access.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID)))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(store.get("/matches/777").expiresAt()).as("0 interval stores no stamp").isNull();
+
+            // Outage: the due re-fetch fails and the retained body is served...
+            client.bodies.remove("/matches/777");
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            int callsAfterOutageServe = client.calls.get();
+            // ...but advanceRefetchStampAfterFailure must NOT stamp a backoff: with a 0 interval the
+            // row stays stampless, and every further access genuinely re-attempts upstream.
+            assertThat(store.get("/matches/777").expiresAt()).as("stamp unchanged on a 0 interval").isNull();
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
+            assertThat(client.calls.get()).as("a further access re-attempts upstream")
+                    .isEqualTo(callsAfterOutageServe + 1);
         }
     }
 
@@ -1013,6 +1087,79 @@ class L2CachingGatewayTest {
                     com.raorbit.opendota.sidecar.Classification.PINNED, 100, 1L, L2Store.SCHEMA_VERSION, null);
             assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_UNPARSED);
             assertThat(store.get("/matches/777")).as("orphan reclaimed once the stamp elapsed").isNull();
+            assertThat(store.pinnedRowCount()).isZero();
+        }
+    }
+
+    // ---- W2f: a PARSED pinned row whose player was un-watched is re-classed PERMANENT on access ----
+    @Test
+    void unwatchedParsedPinnedRowIsReclassedPermanent(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_PARSED);
+        // First run: the player IS watched, so the parsed match is archived PINNED (no re-fetch stamp).
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID)))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(store.get("/matches/777").classification()).isEqualTo("PINNED");
+        }
+        // Second run over the SAME db with NO watched players. A parsed pinned row has no stamp to
+        // elapse, so without the lookup() orphan check it would hit L2 forever and stay PINNED —
+        // exempt from the main cap and un-evictable under the default unlimited watched budget. The
+        // next access must force a miss and re-store it PERMANENT via maybeStore's fall-through.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, L2Config.Watched.NONE))) {
+            assertThat(store.pinnedRowCount()).as("orphan survives the restart").isEqualTo(1);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(client.calls.get()).as("force-missed and re-fetched once").isEqualTo(2);
+            L2Store.Entry e = store.get("/matches/777");
+            assertThat(e.classification()).as("re-classed under the main cap").isEqualTo("PERMANENT");
+            assertThat(store.rowCount()).as("overwritten in place, not stacked").isEqualTo(1);
+            assertThat(store.pinnedRowCount()).as("the class transition was netted").isZero();
+            assertThat(store.pinnedBodyBytes()).isZero();
+
+            // Once re-classed, it serves from L2 again like any PERMANENT match (no repeated misses).
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(client.calls.get()).isEqualTo(2);
+        }
+    }
+
+    // ---- W2g: a parsed orphan honours the outage backoff stamp instead of re-fetching per access ----
+    @Test
+    void parsedOrphanBacksOffDuringAnOutageInsteadOfRefetchingEveryAccess(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_PARSED);
+        // Archive the parsed match PINNED while the player is watched.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, watching(WATCHED_ID), Duration.ofHours(1).toMillis()))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+        }
+        // Un-watch + an upstream outage. The re-class force-miss fails upstream, so the outage
+        // fallback serves the retained body and stamps a backoff — which the parsed-orphan branch
+        // must then HONOUR: without that, every access during the outage re-pays the full upstream
+        // attempt (timeout + retries + a rate permit), exactly what the backoff exists to prevent.
+        client.bodies.remove("/matches/777");
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, L2Config.Watched.NONE, Duration.ofHours(1).toMillis()))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(gw.stats().l2OutageServe()).isEqualTo(1);
+            int callsAfterOutageServe = client.calls.get();
+            assertThat(store.get("/matches/777").expiresAt()).as("backoff stamped").isNotNull();
+
+            // Within the backoff window the orphan serves straight from L2 — no upstream attempts.
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(client.calls.get()).as("no further upstream attempts within the backoff")
+                    .isEqualTo(callsAfterOutageServe);
+
+            // Outage ends and the stamp elapses: the next access re-fetches and re-classes PERMANENT.
+            L2Store.Entry stamped = store.get("/matches/777");
+            store.put("/matches/777", stamped.body(), com.raorbit.opendota.sidecar.Classification.PINNED,
+                    stamped.storedAt(), 1L, L2Store.SCHEMA_VERSION, null);
+            client.bodies.put("/matches/777", WATCHED_MATCH_PARSED);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(store.get("/matches/777").classification()).isEqualTo("PERMANENT");
             assertThat(store.pinnedRowCount()).isZero();
         }
     }
@@ -1159,6 +1306,33 @@ class L2CachingGatewayTest {
             gw.get("/matches/777");
             assertThat(c3.posts).isEmpty();
             assertThat(gw.stats().parseRequested()).isZero();
+        }
+    }
+
+    // ---- W8b: a read-only sidecar (allowWrites=false) never issues parse requests, even with ----
+    // ---- watched players + auto-parse configured (the default-on knob must not override the lever) ----
+    @Test
+    void readOnlyGatewayNeverIssuesParseRequests(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_UNPARSED);
+        // Watched player + auto-parse ON (the default when watching) + refetch 0 so every access
+        // force-misses — but the gateway is built with allowWrites=false, so no auto-parser exists.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store,
+                     config(db, watching(WATCHED_ID), 0L, true), false)) {
+            gw.get("/matches/777");
+            gw.get("/matches/777");
+            // startWatchedParsePoll must be a no-op too (no auto-parser to start).
+            gw.startWatchedParsePoll();
+            // Give a would-be async POST ample time to land before asserting none did.
+            Thread.sleep(150);
+            assertThat(client.posts).as("a read-only sidecar spends no write budget").isEmpty();
+            assertThat(gw.stats().parseRequested()).isZero();
+            assertThat(Thread.getAllStackTraces().keySet().stream()
+                    .anyMatch(t -> "watched-parse-poll".equals(t.getName()) && t.isAlive()))
+                    .as("no poll thread is spawned").isFalse();
+            // The archive itself still works read-only: the unparsed match is stored PINNED.
+            assertThat(store.get("/matches/777").classification()).isEqualTo("PINNED");
         }
     }
 

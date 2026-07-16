@@ -39,6 +39,18 @@ jobs:
           if [ "$VERSION" != "$sidecar_version" ]; then
             echo "::error::tag version '$VERSION' != sidecar pom version '$sidecar_version' — bump sidecar/pom.xml before tagging"; exit 1
           fi
+          # The MCP server version is resource-filtered from the pom — refuse a hardcoded regression.
+          if ! grep -q '^spring\.ai\.mcp\.server\.version=@project\.version@$' src/main/resources/application.properties; then
+            echo "::error::application.properties spring.ai.mcp.server.version must stay @project.version@ (filtered from the pom)"; exit 1
+          fi
+          # The client User-Agent falls back to a literal when no manifest is present; keep it (and the
+          # byte-identical sidecar copy) at the release version so a dev-run client never misreports.
+          for f in src/main/java/com/raorbit/opendota/client/OpenDotaClient.java \
+                   sidecar/src/main/java/com/raorbit/opendota/client/OpenDotaClient.java; do
+            if ! grep -q "FALLBACK_VERSION = \"$VERSION\"" "$f"; then
+              echo "::error::$f FALLBACK_VERSION != '$VERSION' — bump it (and re-run scripts/sync-client-copies) before tagging"; exit 1
+            fi
+          done
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       # Two independent Maven builds (no reactor). The sidecar must be built from the

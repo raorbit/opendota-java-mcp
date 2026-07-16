@@ -9,7 +9,7 @@ services:
   sidecar:
     build:
       context: ./sidecar
-    image: opendota-sidecar:1.2.0
+    image: opendota-sidecar:1.3.0
     init: true
     environment:
       # Secrets come from .env (Compose auto-loads it for ${...} substitution; see .env.example).

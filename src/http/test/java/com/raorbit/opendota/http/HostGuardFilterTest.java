@@ -98,6 +98,73 @@ class HostGuardFilterTest {
         verify(chain, never()).doFilter(request, response);
     }
 
+    // --- the browser cross-origin (CSRF) guard, mirroring the sidecar's policy ---
+
+    @Test
+    void crossOriginBrowserRequestsAreRejectedDespiteALoopbackHost() throws Exception {
+        // A direct fetch(..., {mode:'no-cors'}) from any open page carries a legitimate loopback Host,
+        // so the rebinding check alone passes it — the forbidden fetch-metadata/Origin headers are the
+        // only signal, and they must be refused. Sec-Fetch-Site covers modern browsers; a bare Origin
+        // covers older ones on cross-origin POSTs.
+        assertRejectedWithBrowserHeaders("cross-site", null);
+        assertRejectedWithBrowserHeaders("same-site", null);           // another localhost port
+        assertRejectedWithBrowserHeaders("cross-site", "https://evil.example");
+        assertRejectedWithBrowserHeaders(null, "https://evil.example");   // Origin-only (older browser)
+        assertRejectedWithBrowserHeaders(null, "null");                   // sandboxed/opaque origin
+    }
+
+    @Test
+    void nonBrowserAndUserNavigationRequestsStillPass() throws Exception {
+        // A local MCP client sends neither header; a user-typed navigation sends Sec-Fetch-Site: none.
+        assertPassesWithBrowserHeaders(null, null);
+        assertPassesWithBrowserHeaders("none", null);
+        assertPassesWithBrowserHeaders("same-origin", null);
+    }
+
+    @Test
+    void browserCrossOriginBlockedDecisionTable() {
+        assertThat(HostGuardFilter.browserCrossOriginBlocked(null, null)).isFalse();
+        assertThat(HostGuardFilter.browserCrossOriginBlocked("none", null)).isFalse();
+        assertThat(HostGuardFilter.browserCrossOriginBlocked("same-origin", null)).isFalse();
+        assertThat(HostGuardFilter.browserCrossOriginBlocked(" Same-Origin ", null)).isFalse();
+        assertThat(HostGuardFilter.browserCrossOriginBlocked("cross-site", null)).isTrue();
+        assertThat(HostGuardFilter.browserCrossOriginBlocked("same-site", null)).isTrue();
+        // Any Origin at all is refused: this server serves no pages, so no same-origin browser
+        // request legitimately exists — exactly the sidecar's rule.
+        assertThat(HostGuardFilter.browserCrossOriginBlocked(null, "http://localhost:3000")).isTrue();
+        assertThat(HostGuardFilter.browserCrossOriginBlocked("none", "null")).isTrue();
+    }
+
+    private static void assertRejectedWithBrowserHeaders(String secFetchSite, String origin) throws Exception {
+        HostGuardFilter filter = filterAllowing();
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader("Host")).thenReturn("127.0.0.1:8080");   // legitimate loopback Host
+        when(request.getHeader("Sec-Fetch-Site")).thenReturn(secFetchSite);
+        when(request.getHeader("Origin")).thenReturn(origin);
+        HttpServletResponse response = mockResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        filter.doFilterInternal(request, response, chain);
+
+        verify(response).setStatus(HttpServletResponse.SC_FORBIDDEN);
+        verify(chain, never()).doFilter(request, response);
+    }
+
+    private static void assertPassesWithBrowserHeaders(String secFetchSite, String origin) throws Exception {
+        HostGuardFilter filter = filterAllowing();
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader("Host")).thenReturn("127.0.0.1:8080");
+        when(request.getHeader("Sec-Fetch-Site")).thenReturn(secFetchSite);
+        when(request.getHeader("Origin")).thenReturn(origin);
+        HttpServletResponse response = mockResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        filter.doFilterInternal(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        verify(response, never()).setStatus(HttpServletResponse.SC_FORBIDDEN);
+    }
+
     // --- shouldNotFilter: only the exact health endpoint is left un-gated ---
 
     @Test

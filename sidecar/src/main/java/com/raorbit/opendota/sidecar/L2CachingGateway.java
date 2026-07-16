@@ -75,6 +75,13 @@ public final class L2CachingGateway implements AutoCloseable {
     // --- counters (spec §8) ---
     private final AtomicLong l2Hit = new AtomicLong();
     private final AtomicLong l2Miss = new AtomicLong();
+    /**
+     * Requests served the retained PINNED body because the forced re-fetch failed (an upstream
+     * outage). Counted separately from {@code l2Hit} so one outage-served request no longer bumps
+     * both {@code l2Miss} (the attempt) and {@code l2Hit} (the fallback) — a double count that made
+     * the hit ratio lie during exactly the window the archive is meant to shine.
+     */
+    private final AtomicLong l2OutageServe = new AtomicLong();
     private final AtomicLong l2Store = new AtomicLong();
     private final AtomicLong l2WatchedStore = new AtomicLong();
     private final AtomicLong l2StoreSkippedUnparsed = new AtomicLong();
@@ -103,22 +110,48 @@ public final class L2CachingGateway implements AutoCloseable {
     private volatile long lastPatchBustMillis;
     /** Whether the last attempt failed to observe a patch id, so the next check uses the shorter failure backoff. */
     private volatile boolean lastPatchCheckFailed;
+    /**
+     * The current patch id as last observed (or read from the store's meta row); {@code null} until
+     * known. Seeded once in the constructor and refreshed only inside the interval-gated check, so the
+     * not-due fast path of {@link #maybeCheckPatch} reads this volatile instead of calling
+     * {@code store.storedPatchId()} — a {@code synchronized} read on the single <em>write</em>
+     * connection — on every patch-scoped request, which would serialize otherwise-parallel
+     * read-pool lookups.
+     */
+    private volatile String cachedPatchId;
     /** Guards a single in-flight patch check so concurrent PERMANENT requests don't all check at once. */
     private final AtomicBoolean patchCheckInProgress = new AtomicBoolean(false);
     /** Paths with a store in flight, so concurrent single-flight misses collapse to one write. */
     private final Set<String> storing = ConcurrentHashMap.newKeySet();
 
     public L2CachingGateway(OpenDotaClient client, L2Store store, L2Config config) {
+        this(client, store, config, true);
+    }
+
+    /**
+     * @param allowWrites whether this sidecar may issue writes at all (the operator's
+     *                    {@code OPENDOTA_SIDECAR_ALLOW_WRITES} lever). The auto-parser POSTs
+     *                    {@code /request/{id}} on its own initiative, so a read-only sidecar must not
+     *                    construct it — otherwise "read-only" would still spend the ~10×-charged write
+     *                    budget on the shared key via the watched-archive parse requests.
+     */
+    public L2CachingGateway(OpenDotaClient client, L2Store store, L2Config config, boolean allowWrites) {
         this.client = client;
         this.store = store;
         this.config = config;
         this.watchedPattern = buildWatchedPattern(config.watchedAccountIds());
-        // Auto-parse is active only when players are watched AND it is enabled (on by default). The poll
-        // is NOT started here — startWatchedParsePoll() does that from SidecarMain, so unit tests that
-        // construct a gateway never spawn a background thread.
-        this.autoParser = (watchedPattern != null && config.watchedAutoParse())
+        // Auto-parse is active only when players are watched AND it is enabled (on by default) AND the
+        // sidecar may write at all. The poll is NOT started here — startWatchedParsePoll() does that
+        // from SidecarMain, so unit tests that construct a gateway never spawn a background thread.
+        boolean autoParseConfigured = watchedPattern != null && config.watchedAutoParse();
+        this.autoParser = (allowWrites && autoParseConfigured)
                 ? new WatchedAutoParser(client, config.watchedAccountIds(), config.watchedParsePollMillis())
                 : null;
+        if (!allowWrites && autoParseConfigured) {
+            LOG.info(() -> "watched auto-parse is configured but writes are disabled "
+                    + "(OPENDOTA_SIDECAR_ALLOW_WRITES=false): the archive stays read-only and no "
+                    + "parse requests will be issued.");
+        }
         // The patch probe reads /constants/patch THROUGH the client, so it is served from L1 for its
         // ttlFor horizon (6h): a patch-check interval below that silently cannot observe a change any
         // faster — the knob looks effective but detection is still floored at the L1 TTL. Warn rather
@@ -130,6 +163,26 @@ public final class L2CachingGateway implements AutoCloseable {
                     + "through the client's cache — a patch change still takes up to " + patchProbeL1Millis
                     + "ms to detect. Set OPENDOTA_SIDECAR_PATCH_ID to drive detection explicitly, or "
                     + "leave the interval at/above the TTL.");
+        }
+        // Same floor for the watched-archive re-fetch: the forced re-fetch of an unparsed PINNED match
+        // reads /matches/{id} THROUGH the client, so it is served from L1 for that path's ttlFor horizon
+        // — a smaller interval (including 0, re-fetch on every access) keeps re-reading the same cached
+        // unparsed body and cannot observe a parse any faster than the L1 TTL. Warn rather than clamp,
+        // mirroring the patch-check floor above.
+        long matchL1Millis = client.ttlFor("/matches/0").toMillis();
+        if (watchedPattern != null && config.watchedRefetchMillis() < matchL1Millis) {
+            LOG.warning(() -> "L2 watched re-fetch interval " + config.watchedRefetchMillis()
+                    + "ms is below the " + matchL1Millis + "ms L1 TTL of /matches/{id}, which the forced "
+                    + "re-fetch reads through the client's cache — an unparsed watched match still takes "
+                    + "up to " + matchL1Millis + "ms to observe its parse. Leave "
+                    + "OPENDOTA_SIDECAR_L2_WATCHED_REFETCH_MILLIS at/above the TTL.");
+        }
+        // Seed the patch-id cache from the store once, so early not-due requests (e.g. while another
+        // thread runs the first interval-gated check) don't see an unknown patch and skip their stores.
+        try {
+            this.cachedPatchId = store.storedPatchId();
+        } catch (SQLException ex) {
+            recordError("L2 patch read", "(meta)", ex);
         }
     }
 
@@ -209,7 +262,7 @@ public final class L2CachingGateway implements AutoCloseable {
                 // permit — defeating the documented at-most-once-per-interval bound exactly when
                 // the archive is supposed to ride out the outage.
                 advanceRefetchStampAfterFailure(path, stale);
-                l2Hit.incrementAndGet();
+                l2OutageServe.incrementAndGet();
                 return stale.body();
             }
             throw ex;
@@ -256,16 +309,36 @@ public final class L2CachingGateway implements AutoCloseable {
                     && e.patchId() != null && !currentPatchId.equals(e.patchId())) {
                 return null;
             }
-            // Save-now-upgrade-later (spec §6.5): an UNPARSED PINNED match is served from L2 until its
-            // re-fetch stamp (expires_at) elapses, then force a re-fetch (return null) so maybeStore can
-            // upgrade it in place to the parsed body once OpenDota parses. This bounds the re-fetch to at
-            // most once per watchedRefetchMillis rather than on every access. A null expires_at on an
-            // unparsed pinned row (e.g. pre-retry-after data, or a 0 interval) is treated as due now.
             if (Classification.PINNED.name().equals(e.classification())
-                    && MATCH_ID.matcher(stripQuery(path)).matches()
-                    && !isParsedMatch(e.body())
-                    && (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis())) {
-                return null;
+                    && MATCH_ID.matcher(stripQuery(path)).matches()) {
+                if (!isParsedMatch(e.body())) {
+                    // Save-now-upgrade-later (spec §6.5): an UNPARSED PINNED match is served from L2
+                    // until its re-fetch stamp (expires_at) elapses, then force a re-fetch (return null)
+                    // so maybeStore can upgrade it in place to the parsed body once OpenDota parses.
+                    // This bounds the re-fetch to at most once per watchedRefetchMillis rather than on
+                    // every access. A null expires_at on an unparsed pinned row (e.g. pre-retry-after
+                    // data, or a 0 interval) is treated as due now. (An un-watched unparsed orphan is
+                    // reclaimed on the same schedule: the elapsed-stamp miss re-fetches, and maybeStore's
+                    // unparsed non-watched branch deletes the row.)
+                    if (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis()) {
+                        return null;
+                    }
+                } else if (watchedPattern == null || !watchedPattern.matcher(e.body()).find()) {
+                    // A PARSED pinned row whose player is no longer watched. A parsed row normally
+                    // carries no re-fetch stamp, so serving it here would keep it PINNED forever —
+                    // maybeStore (where the re-class happens) only runs on a miss — leaving an orphan
+                    // that is exempt from the main cap and un-evictable under the default unlimited
+                    // watched budget. Force a miss: the re-fetch falls through maybeStore's parsed
+                    // non-watched branch and is re-stored PERMANENT (put() nets the PINNED→PERMANENT
+                    // transition, moving the row under the main cap). A LIVE stamp is honoured exactly
+                    // like the unparsed branch above: after a failed re-class re-fetch the outage
+                    // fallback stamps a backoff (advanceRefetchStampAfterFailure), and force-missing
+                    // straight past it would re-pay the dead upstream on every access for the whole
+                    // outage. Null = due now, so the healthy-path re-class stays immediate.
+                    if (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis()) {
+                        return null;
+                    }
+                }
             }
             return e;
         } catch (SQLException ex) {
@@ -536,6 +609,12 @@ public final class L2CachingGateway implements AutoCloseable {
                     lastPatchCheckMillis = System.currentTimeMillis();
                     lastPatchCheckFailed = true;
                 }
+                // Publish to concurrent not-due readers only AFTER the bust ran and lastPatchBustMillis
+                // is armed. Publishing the new id any earlier would let a reader miss on the per-row
+                // guard, fetch a pre-patch body its L1 still holds, and store it stamped with the NEW
+                // id while withinPostBustL1Window still reads an unarmed bust stamp — pinning stale
+                // static data for the whole patch cycle (the exact bug the hold-off window prevents).
+                cachedPatchId = observed != null ? observed : stored;
                 return observed != null ? observed : stored;
             } catch (SQLException ex) {
                 recordError("L2 patch check", "/constants/patch", ex);
@@ -543,13 +622,10 @@ public final class L2CachingGateway implements AutoCloseable {
                 patchCheckInProgress.set(false);
             }
         }
-        // Not due (or another thread is checking): fall back to the stored id for the read guard.
-        try {
-            return store.storedPatchId();
-        } catch (SQLException ex) {
-            recordError("L2 patch read", "(meta)", ex);
-            return null;
-        }
+        // Not due (or another thread is checking): use the cached id for the read guard. Reading the
+        // store's meta row here would put a synchronized write-connection read on EVERY patch-scoped
+        // request — even L2 hits — serializing what the read pool exists to parallelize.
+        return cachedPatchId;
     }
 
     /**
@@ -764,18 +840,21 @@ public final class L2CachingGateway implements AutoCloseable {
      * on each access until it parses (see the upgrade path in {@link #maybeStore}), so this can exceed the
      * number of archived matches. {@code pinnedRows}/{@code pinnedBytes} are the store's current watched-
      * archive totals (the durable, deduplicated size of the archive against its budget). {@code parseRequested}
-     * /{@code parseErrors} count auto-parse requests issued / failed (both {@code 0} when auto-parse is off).
+     * /{@code parseErrors} count auto-parse requests issued / failed (both {@code 0} when auto-parse is
+     * off). {@code l2OutageServe} counts requests served the retained PINNED body after a failed forced
+     * re-fetch (each also counted an {@code l2Miss} for the attempt, but never an {@code l2Hit}).
      */
     public record L2Stats(long l2Hit, long l2Miss, long l2Store, long l2WatchedStore,
                           long l2StoreSkippedUnparsed, long l2PatchBust, long l2Error, long noStore,
-                          long pinnedRows, long pinnedBytes, long parseRequested, long parseErrors) {
+                          long l2OutageServe, long pinnedRows, long pinnedBytes,
+                          long parseRequested, long parseErrors) {
     }
 
     /** Snapshot the current counters. */
     public L2Stats stats() {
         return new L2Stats(l2Hit.get(), l2Miss.get(), l2Store.get(), l2WatchedStore.get(),
                 l2StoreSkippedUnparsed.get(), l2PatchBust.get(), l2Error.get(), noStore.get(),
-                store.pinnedRowCount(), store.pinnedBodyBytes(),
+                l2OutageServe.get(), store.pinnedRowCount(), store.pinnedBodyBytes(),
                 autoParser == null ? 0L : autoParser.parseRequested(),
                 autoParser == null ? 0L : autoParser.parseErrors());
     }

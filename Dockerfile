@@ -3,7 +3,7 @@
 # Main OpenDota MCP server (stdio transport). This image is for distribution / running
 # without a host JDK. Because the server speaks MCP over stdin/stdout, run it as:
 #
-#   docker run -i --rm --init -e OPENDOTA_API_KEY opendota-mcp:1.2.0
+#   docker run -i --rm --init -e OPENDOTA_API_KEY opendota-mcp:1.3.0
 #
 # Never allocate a TTY (-t) — it would corrupt the JSON-RPC framing on stdout. The MCP
 # client config uses "command": "docker" with these args plus an "env" block carrying

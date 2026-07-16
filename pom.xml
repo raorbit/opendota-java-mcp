@@ -13,7 +13,7 @@
 
     <groupId>com.raorbit</groupId>
     <artifactId>opendota-mcp</artifactId>
-    <version>1.2.0</version>
+    <version>1.3.0</version>
     <packaging>jar</packaging>
 
     <name>opendota-mcp</name>
@@ -97,6 +97,24 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!--
+              Stamp Implementation-Title/-Version into the jar manifest so OpenDotaClient can derive
+              its User-Agent version from the build (single source: the pom version) instead of a
+              hand-maintained literal. The spring-boot repackage keeps these entries, and its launcher
+              associates the outer manifest with BOOT-INF/classes packages, so
+              Package.getImplementationVersion() works inside the fat jar.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
             </plugin>
             <!--
               Exposes each dependency's jar path as a ${groupId:artifactId:type}
@@ -188,7 +206,7 @@
           'mvn -Phttp package' ADDS the Spring AI webmvc MCP server starter (which
           transitively pulls spring-boot-starter-web / embedded Tomcat + the
           Streamable-HTTP transport) and attaches a distinct 'http'-classified jar
-          (target/opendota-mcp-1.2.0-http.jar) so stdio users never grab the web jar.
+          (target/opendota-mcp-1.3.0-http.jar) so stdio users never grab the web jar.
           Activate the matching Spring profile at runtime with
           -Dspring.profiles.active=http (loads application-http.properties).
 

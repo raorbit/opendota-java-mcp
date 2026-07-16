@@ -13,10 +13,12 @@ import java.util.regex.Pattern;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * Anti-DNS-rebinding guard for the {@code auth-mode=none} loopback instance, mirroring the
- * sidecar's {@code hostAllowed} check. Registered only when {@code opendota.http.auth-mode=none}
- * (see {@link HttpMcpConfig}); in bearer mode the secret itself defeats a rebinding page (it
- * cannot know the bearer), so no host check is needed there.
+ * Anti-DNS-rebinding <em>and</em> anti-CSRF guard for the {@code auth-mode=none} loopback instance,
+ * mirroring the sidecar's {@code hostAllowed} + {@code browserCrossOriginBlocked} checks on its
+ * byte-identical token-less loopback surface. Registered only when
+ * {@code opendota.http.auth-mode=none} (see {@link HttpMcpConfig}); in bearer mode the secret itself
+ * defeats a rebinding or cross-origin page (it cannot know the bearer), so neither check is needed
+ * there.
  *
  * <p>Without this, Spring AI 1.1.8's Streamable-HTTP transport applies NO Host/Origin validation
  * ({@code ServerTransportSecurityValidator.NOOP}), so a malicious page that rebinds its own
@@ -68,13 +70,39 @@ public class HostGuardFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        if (!hostAllowed(request.getHeader("Host"), allowedHosts)) {
+        if (!hostAllowed(request.getHeader("Host"), allowedHosts)
+                || browserCrossOriginBlocked(request.getHeader("Sec-Fetch-Site"),
+                        request.getHeader("Origin"))) {
             response.setStatus(HttpServletResponse.SC_FORBIDDEN);
             response.setContentType("application/json; charset=utf-8");
             response.getWriter().write("{\"error\":\"forbidden\"}");
             return;
         }
         chain.doFilter(request, response);
+    }
+
+    /**
+     * Anti-CSRF guard complementing the Host check — the same policy the sidecar enforces on its
+     * token-less loopback surface. A page the user has open can fire a direct cross-origin
+     * {@code fetch(..., {mode:'no-cors'})} at {@code http://127.0.0.1:8080/mcp}: the browser sends a
+     * legitimate loopback {@code Host}, so the anti-rebinding check passes and the page could drive
+     * MCP {@code initialize} + {@code tools/call} on the "loopback-only" endpoint. Browsers stamp
+     * such requests with forbidden headers page JavaScript cannot forge or strip:
+     * {@code Sec-Fetch-Site} (every modern browser) and {@code Origin} (always sent on cross-origin
+     * POSTs). A local MCP client — or a remote-connector client behind the tunnel — sends neither.
+     * So refuse when {@code Sec-Fetch-Site} is anything but {@code same-origin}/{@code none} (a
+     * user-typed navigation), and when any {@code Origin} header is present at all: this server
+     * serves no pages, so no legitimate same-origin browser request exists. Static and
+     * package-private so the decision logic is unit-testable.
+     */
+    static boolean browserCrossOriginBlocked(String secFetchSite, String origin) {
+        if (secFetchSite != null) {
+            String s = secFetchSite.trim().toLowerCase(Locale.ROOT);
+            if (!s.equals("same-origin") && !s.equals("none")) {
+                return true;
+            }
+        }
+        return origin != null;
     }
 
     /**

@@ -39,6 +39,29 @@ class TtlCacheTest {
     }
 
     @Test
+    void utf8LengthAgreesWithGetBytesForEveryShape() {
+        // put() now counts UTF-8 bytes without allocating the encoded copy; the count must agree
+        // with getBytes(UTF_8).length exactly — including the encoder's 1-byte '?' replacement for
+        // unpaired surrogates — or the byte accounting drifts.
+        String[] samples = {
+                "",
+                "plain ascii body",
+                "café au lait",                       // 2-byte sequences (Latin-1 supplement)
+                "ࠀ中文￿",                // 3-byte sequences (BMP incl. CJK)
+                "emoji 😀 pair 🏹",    // 4-byte surrogate pairs
+                "lone high \ud800 surrogate",              // unpaired high -> replacement byte
+                "lone low \udc00 surrogate",               // unpaired low -> replacement byte
+                "high at end \ud800",                      // unpaired high as the final char
+                "mixed é中😀\ud800x",
+        };
+        for (String s : samples) {
+            assertThat(TtlCache.utf8Length(s))
+                    .as("utf8Length(%s)", s)
+                    .isEqualTo(s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        }
+    }
+
+    @Test
     void getReturnsNullAfterTtlElapses() throws InterruptedException {
         TtlCache cache = new TtlCache();
         cache.put("/heroes", "[1,2,3]", Duration.ofMillis(40));

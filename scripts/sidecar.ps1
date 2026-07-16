@@ -21,7 +21,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $RootDir = Split-Path -Parent $PSScriptRoot
-$Jar     = Join-Path $RootDir 'sidecar\target\opendota-sidecar-1.2.0.jar'
+$Jar     = Join-Path $RootDir 'sidecar\target\opendota-sidecar-1.3.0.jar'
 $RunDir  = Join-Path $RootDir 'sidecar\.run'
 $PidFile = Join-Path $RunDir 'sidecar.pid'
 $LogFile = Join-Path $RunDir 'sidecar.log'

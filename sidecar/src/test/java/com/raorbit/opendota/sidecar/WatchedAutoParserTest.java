@@ -102,6 +102,47 @@ class WatchedAutoParserTest {
     }
 
     @Test
+    void requestParseAsyncIssuesThePostOffThreadAndDedupes() throws Exception {
+        FakeClient client = new FakeClient();
+        try (client; WatchedAutoParser parser = new WatchedAutoParser(client, Set.of(5L), 3_600_000L)) {
+            parser.requestParseAsync(777L);
+            // The POST runs on the daemon parse executor, so await it rather than asserting instantly.
+            for (int i = 0; i < 200 && parser.parseRequested() < 1; i++) {
+                Thread.sleep(10);
+            }
+            assertThat(client.posts).containsExactly("/request/777");
+            assertThat(parser.parseRequested()).isEqualTo(1);
+
+            // Deduped against both async and sync triggers: neither issues a second POST.
+            parser.requestParseAsync(777L);
+            parser.requestParse(777L);
+            Thread.sleep(100);
+            assertThat(client.posts).containsExactly("/request/777");
+        }
+    }
+
+    @Test
+    void requestParseAsyncAfterCloseIsASilentNoOpThatLeavesTheIdRetryable() {
+        FakeClient client = new FakeClient();
+        WatchedAutoParser parser = new WatchedAutoParser(client, Set.of(5L), 3_600_000L);
+        try (client) {
+            parser.close();   // the parse executor is shut down; an in-flight access may still race this
+
+            // The rejected submit must not throw, must not count an error, and must undo the dedup
+            // add so the id stays eligible for a later retry.
+            assertThatCode(() -> parser.requestParseAsync(777L)).doesNotThrowAnyException();
+            assertThat(client.posts).isEmpty();
+            assertThat(parser.parseErrors()).isZero();
+            assertThat(parser.parseRequested()).isZero();
+
+            // A later synchronous request (e.g. a poll in a fresh parser sharing upstream state, or a
+            // test) still POSTs: the dedup set holds no ghost entry for the dropped request.
+            parser.requestParse(777L);
+            assertThat(client.posts).containsExactly("/request/777");
+        }
+    }
+
+    @Test
     void pollOnceRequestsParsesForEachWatchedPlayersUnparsedMatches() {
         FakeClient client = new FakeClient();
         client.bodies.put("/players/5/matches?project=version&limit=100",
@@ -113,6 +154,33 @@ class WatchedAutoParserTest {
             // Only the two unparsed matches (11, 20) were requested; the parsed one (10) was skipped.
             assertThat(client.posts).containsExactlyInAnyOrder("/request/11", "/request/20");
             assertThat(parser.parseRequested()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void pollOnceCapsParseRequestsPerSweepAndLaterSweepsDrainTheBacklog() {
+        FakeClient client = new FakeClient();
+        int backlog = WatchedAutoParser.MAX_PARSE_REQUESTS_PER_SWEEP + 5;
+        StringBuilder body = new StringBuilder("[");
+        for (int i = 1; i <= backlog; i++) {
+            if (i > 1) {
+                body.append(',');
+            }
+            body.append("{\"match_id\":").append(i).append(",\"version\":null}");
+        }
+        body.append(']');
+        client.bodies.put("/players/5/matches?project=version&limit=100", body.toString());
+        try (client; WatchedAutoParser parser = new WatchedAutoParser(client, Set.of(5L), 3_600_000L)) {
+            // One sweep issues at most the cap — a fresh backlog must not burn a burst of ~10x-charged
+            // POSTs competing with agent GETs for rate permits.
+            parser.pollOnce();
+            assertThat(client.posts).hasSize(WatchedAutoParser.MAX_PARSE_REQUESTS_PER_SWEEP);
+
+            // The next sweep drains the remainder: already-requested ids are deduped and do NOT
+            // consume the cap, so the 5 left-overs all go out.
+            parser.pollOnce();
+            assertThat(client.posts).hasSize(backlog);
+            assertThat(parser.parseRequested()).isEqualTo(backlog);
         }
     }
 

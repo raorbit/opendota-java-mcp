@@ -71,7 +71,7 @@ profile, which is the clean seam that keeps the default build byte-behavior-iden
   `io.modelcontextprotocol.sdk:mcp-spring-webmvc` transport (sibling of the core
   `mcp` 0.18.3 — also never declared directly), and `spring-webmvc`.
 - The profile attaches a distinct **`http`-classified** artifact
-  (`target/opendota-mcp-1.2.0-http.jar`) via the spring-boot-maven-plugin
+  (`target/opendota-mcp-1.3.0-http.jar`) via the spring-boot-maven-plugin
   `<classifier>http</classifier>`, so the plain unclassified jar stays web-free.
 - The http-only sources live in `src/http/java` and are compiled **only** under the
   profile (added via `build-helper-maven-plugin` 3.6.1).

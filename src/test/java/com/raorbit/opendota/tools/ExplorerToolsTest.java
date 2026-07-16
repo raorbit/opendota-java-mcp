@@ -122,6 +122,50 @@ class ExplorerToolsTest {
     }
 
     @Test
+    void validWithCtePassesAndGetsTheLimitAppended() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        when(client.getJson(anyString())).thenReturn("{\"rows\":[]}");
+        ExplorerTools tools = new ExplorerTools(client);
+
+        // WITH is an allowed read-only start; the CTE must reach /explorer with the cap appended.
+        tools.runSqlExplorer("WITH t AS (SELECT account_id FROM players) SELECT * FROM t", null);
+
+        assertThat(capturedPath(client)).isEqualTo("/explorer?sql=" + OpenDotaClient.encode(
+                "WITH t AS (SELECT account_id FROM players) SELECT * FROM t LIMIT 200"));
+    }
+
+    @Test
+    void writingCtesAreRejectedDespiteTheReadOnlyLookingSelect() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        ExplorerTools tools = new ExplorerTools(client);
+
+        // Postgres allows data-modifying CTEs: the statement starts with WITH (passing the start
+        // check), so only the keyword blocklist stands between this and a write. Both DML forms
+        // must be rejected and never reach the client.
+        String deleteCte = tools.runSqlExplorer(
+                "WITH x AS (DELETE FROM players RETURNING *) SELECT * FROM x", null);
+        String updateCte = tools.runSqlExplorer(
+                "WITH x AS (UPDATE players SET personaname='x' RETURNING *) SELECT * FROM x", null);
+
+        assertThat(deleteCte).contains("\"isError\":true").contains("disallowed keyword");
+        assertThat(updateCte).contains("\"isError\":true").contains("disallowed keyword");
+        verify(client, never()).getJson(anyString());
+    }
+
+    @Test
+    void nonJsonExplorerBodyIsPassedThroughVerbatim() throws Exception {
+        OpenDotaClient client = mock(OpenDotaClient.class);
+        // The documented non-JSON passthrough in shape(): an unparseable body is returned as-is —
+        // no error envelope, no throw out of the never-throwing handler.
+        when(client.getJson(anyString())).thenReturn("not json");
+        ExplorerTools tools = new ExplorerTools(client);
+
+        String result = tools.runSqlExplorer("SELECT 1", null);
+
+        assertThat(result).isEqualTo("not json");
+    }
+
+    @Test
     void rejectsBlockedKeywordInSelectBody() throws Exception {
         OpenDotaClient client = mock(OpenDotaClient.class);
         ExplorerTools tools = new ExplorerTools(client);

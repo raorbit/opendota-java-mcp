@@ -6,7 +6,7 @@ instead of being launched locally over stdio.
 
 > **The default build is unaffected.** Everything here is opt-in: it requires the
 > `-Phttp` Maven build and the `http` Spring profile at runtime. Plain `mvn package`
-> still produces the pure-stdio `target/opendota-mcp-1.2.0.jar` with no web server,
+> still produces the pure-stdio `target/opendota-mcp-1.3.0.jar` with no web server,
 > and existing Claude Desktop / Claude Code stdio users are unchanged. See
 > [`mcp-registration.md`](mcp-registration.md) for the stdio setup.
 
@@ -48,8 +48,8 @@ distinct `http`-classified jar:
 
 ```sh
 mvn -Phttp clean package
-# -> target/opendota-mcp-1.2.0-http.jar   (the runnable http jar)
-# The unclassified opendota-mcp-1.2.0.jar this build leaves behind is a thin,
+# -> target/opendota-mcp-1.3.0-http.jar   (the runnable http jar)
+# The unclassified opendota-mcp-1.3.0.jar this build leaves behind is a thin,
 # non-executable jar (no launcher) — for a runnable stdio jar, run a plain `mvn package`.
 ```
 
@@ -65,14 +65,14 @@ the sidecar:
 ```sh
 # bash
 SPRING_PROFILES_ACTIVE=http OPENDOTA_HTTP_BEARER_TOKEN=<secret> \
-  java -jar target/opendota-mcp-1.2.0-http.jar
+  java -jar target/opendota-mcp-1.3.0-http.jar
 ```
 
 ```powershell
 # PowerShell
 $env:SPRING_PROFILES_ACTIVE = 'http'
 $env:OPENDOTA_HTTP_BEARER_TOKEN = '<secret>'
-java -jar target\opendota-mcp-1.2.0-http.jar
+java -jar target\opendota-mcp-1.3.0-http.jar
 ```
 
 The Streamable-HTTP MCP endpoint is then at `http://127.0.0.1:8080/mcp`.
