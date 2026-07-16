@@ -95,6 +95,24 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
             <!--
+              Stamp Implementation-Title/-Version into the jar manifest so OpenDotaClient can derive
+              its User-Agent version from the build (single source: the pom version) instead of a
+              hand-maintained literal. The spring-boot repackage keeps these entries, and its launcher
+              associates the outer manifest with BOOT-INF/classes packages, so
+              Package.getImplementationVersion() works inside the fat jar.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+            <!--
               Exposes each dependency's jar path as a ${groupId:artifactId:type}
               property so the surefire argLine below can point -javaagent at the
               resolved mockito-core jar.

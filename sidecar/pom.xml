@@ -89,6 +89,9 @@
                             <mainClass>com.raorbit.opendota.sidecar.SidecarMain</mainClass>
                             <addClasspath>true</addClasspath>
                             <classpathPrefix>lib/</classpathPrefix>
+                            <!-- Implementation-Version feeds the copied OpenDotaClient's User-Agent
+                                 (single source: this pom's version), mirroring the root jar. -->
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                         </manifest>
                     </archive>
                 </configuration>

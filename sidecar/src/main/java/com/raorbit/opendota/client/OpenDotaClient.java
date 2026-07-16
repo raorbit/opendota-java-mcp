@@ -36,7 +36,24 @@ import java.util.concurrent.TimeoutException;
 public class OpenDotaClient implements AutoCloseable {
 
     private static final String DEFAULT_BASE = "https://api.opendota.com/api";
-    private static final String USER_AGENT = "opendota-mcp/1.2.0";
+    /**
+     * Client version when no jar manifest is available (running from {@code target/classes} in tests
+     * or {@code spring-boot:run}). The packaged jars stamp {@code Implementation-Version} from the pom,
+     * so at runtime the User-Agent tracks the release automatically; this literal is only the dev-time
+     * fallback, and release.yml refuses to tag unless it matches the release version.
+     */
+    private static final String FALLBACK_VERSION = "1.2.0";
+    private static final String USER_AGENT = "opendota-mcp/" + clientVersion();
+
+    /**
+     * The version advertised in the {@code User-Agent} header: the enclosing jar manifest's
+     * {@code Implementation-Version} (derived from the pom at build time, so it cannot drift from a
+     * release), else {@link #FALLBACK_VERSION} when no manifest is present.
+     */
+    private static String clientVersion() {
+        String v = OpenDotaClient.class.getPackage().getImplementationVersion();
+        return v != null ? v : FALLBACK_VERSION;
+    }
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
