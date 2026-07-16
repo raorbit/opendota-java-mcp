@@ -273,16 +273,30 @@ public final class L2CachingGateway implements AutoCloseable {
                     && e.patchId() != null && !currentPatchId.equals(e.patchId())) {
                 return null;
             }
-            // Save-now-upgrade-later (spec §6.5): an UNPARSED PINNED match is served from L2 until its
-            // re-fetch stamp (expires_at) elapses, then force a re-fetch (return null) so maybeStore can
-            // upgrade it in place to the parsed body once OpenDota parses. This bounds the re-fetch to at
-            // most once per watchedRefetchMillis rather than on every access. A null expires_at on an
-            // unparsed pinned row (e.g. pre-retry-after data, or a 0 interval) is treated as due now.
             if (Classification.PINNED.name().equals(e.classification())
-                    && MATCH_ID.matcher(stripQuery(path)).matches()
-                    && !isParsedMatch(e.body())
-                    && (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis())) {
-                return null;
+                    && MATCH_ID.matcher(stripQuery(path)).matches()) {
+                if (!isParsedMatch(e.body())) {
+                    // Save-now-upgrade-later (spec §6.5): an UNPARSED PINNED match is served from L2
+                    // until its re-fetch stamp (expires_at) elapses, then force a re-fetch (return null)
+                    // so maybeStore can upgrade it in place to the parsed body once OpenDota parses.
+                    // This bounds the re-fetch to at most once per watchedRefetchMillis rather than on
+                    // every access. A null expires_at on an unparsed pinned row (e.g. pre-retry-after
+                    // data, or a 0 interval) is treated as due now. (An un-watched unparsed orphan is
+                    // reclaimed on the same schedule: the elapsed-stamp miss re-fetches, and maybeStore's
+                    // unparsed non-watched branch deletes the row.)
+                    if (e.expiresAt() == null || e.expiresAt() <= System.currentTimeMillis()) {
+                        return null;
+                    }
+                } else if (watchedPattern == null || !watchedPattern.matcher(e.body()).find()) {
+                    // A PARSED pinned row whose player is no longer watched. A parsed row carries no
+                    // re-fetch stamp, so serving it here would keep it PINNED forever — maybeStore
+                    // (where the re-class happens) only runs on a miss — leaving an orphan that is
+                    // exempt from the main cap and un-evictable under the default unlimited watched
+                    // budget. Force a miss: the re-fetch falls through maybeStore's parsed non-watched
+                    // branch and is re-stored PERMANENT (put() nets the PINNED→PERMANENT transition,
+                    // moving the row under the main cap).
+                    return null;
+                }
             }
             return e;
         } catch (SQLException ex) {

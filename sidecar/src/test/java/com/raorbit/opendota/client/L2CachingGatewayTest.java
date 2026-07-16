@@ -1017,6 +1017,38 @@ class L2CachingGatewayTest {
         }
     }
 
+    // ---- W2f: a PARSED pinned row whose player was un-watched is re-classed PERMANENT on access ----
+    @Test
+    void unwatchedParsedPinnedRowIsReclassedPermanent(@TempDir Path tmp) throws Exception {
+        Path db = tmp.resolve("l2.db");
+        CountingClient client = new CountingClient().with("/matches/777", WATCHED_MATCH_PARSED);
+        // First run: the player IS watched, so the parsed match is archived PINNED (no re-fetch stamp).
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, watching(WATCHED_ID)))) {
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(store.get("/matches/777").classification()).isEqualTo("PINNED");
+        }
+        // Second run over the SAME db with NO watched players. A parsed pinned row has no stamp to
+        // elapse, so without the lookup() orphan check it would hit L2 forever and stay PINNED —
+        // exempt from the main cap and un-evictable under the default unlimited watched budget. The
+        // next access must force a miss and re-store it PERMANENT via maybeStore's fall-through.
+        try (L2Store store = new L2Store(db, L2Store.SCHEMA_VERSION);
+             L2CachingGateway gw = new L2CachingGateway(client, store, config(db, L2Config.Watched.NONE))) {
+            assertThat(store.pinnedRowCount()).as("orphan survives the restart").isEqualTo(1);
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(client.calls.get()).as("force-missed and re-fetched once").isEqualTo(2);
+            L2Store.Entry e = store.get("/matches/777");
+            assertThat(e.classification()).as("re-classed under the main cap").isEqualTo("PERMANENT");
+            assertThat(store.rowCount()).as("overwritten in place, not stacked").isEqualTo(1);
+            assertThat(store.pinnedRowCount()).as("the class transition was netted").isZero();
+            assertThat(store.pinnedBodyBytes()).isZero();
+
+            // Once re-classed, it serves from L2 again like any PERMANENT match (no repeated misses).
+            assertThat(gw.get("/matches/777")).isEqualTo(WATCHED_MATCH_PARSED);
+            assertThat(client.calls.get()).isEqualTo(2);
+        }
+    }
+
     // ---- W3: a parsed watched match serves straight from L2 on the 2nd get ----
     @Test
     void parsedWatchedMatchServesFromL2(@TempDir Path tmp) throws Exception {
